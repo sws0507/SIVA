@@ -125,7 +125,7 @@ async def aplic_triggered_int_test(dut):
   async def expect_intSrcsTriggered_2(dut, value):
     for _ in range(10):
       await RisingEdge(dut.clock)
-      if dut.aplic.aplic.domains_0.intSrcsTriggered_2 == value:
+      if int(dut.aplic.aplic.domains_0.intSrcsTriggered_2.value) == value:
         break
     else:
       assert False, f"Timeout waiting for dut.aplic.intSrcsTriggered_2"
@@ -134,7 +134,7 @@ async def aplic_triggered_int_test(dut):
   await a_put_full32(dut, aplic_m_base_addr+offset_sourcecfg+1*4, sourcecfg_sm_edge1)
   await FallingEdge(dut.clock)
   dut.intSrcs_2.value = 0
-  assert dut.aplic.aplic.domains_0.intSrcsTriggered_2 == 0
+  assert int(dut.aplic.aplic.domains_0.intSrcsTriggered_2.value) == 0
   await FallingEdge(dut.clock)
   dut.intSrcs_2.value = 1
   await expect_intSrcsTriggered_2(dut, 1)
@@ -201,8 +201,8 @@ async def aplic_msi_test(dut):
   async def expect_int_num(dut, num, addr):
     for _ in range(0,10):
       await RisingEdge(dut.clock)
-      if dut.aplic.auto_toIMSIC_out_a_bits_data == num:
-        assert dut.aplic.auto_toIMSIC_out_a_bits_address == addr
+      if int(dut.aplic.auto_toIMSIC_out_a_bits_data.value) == num:
+        assert int(dut.aplic.auto_toIMSIC_out_a_bits_address.value) == addr
         break
     else:
       assert False, f"Timeout waiting for dut.aplic.auto_toIMSIC_out_a_bits_data"
@@ -258,4 +258,3 @@ async def aplic_msi_test(dut):
   await FallingEdge(dut.clock)
   dut.intSrcs_43.value = 0
   await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id)
-
