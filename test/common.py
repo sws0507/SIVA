@@ -34,7 +34,7 @@ op_access_ack = 0
 op_access_ack_data = 1
 async def a_op(dut, addr, data, op, mask, size) -> None:
   await FallingEdge(dut.clock)
-  while not dut.toaia_0_a_ready:
+  while int(dut.toaia_0_a_ready.value) == 0:
     await FallingEdge(dut.clock)
   dut.toaia_0_a_valid.value = 1
   dut.toaia_0_a_bits_opcode.value = op
@@ -56,7 +56,7 @@ async def a_put_full32(dut, addr, data) -> None:
   await a_op32(dut, addr, data, op_put_full)
   for _ in range(10):
     await RisingEdge(dut.clock)
-    if dut.toaia_0_d_bits_opcode == op_access_ack and dut.toaia_0_d_valid == 1:
+    if int(dut.toaia_0_d_bits_opcode.value) == op_access_ack and int(dut.toaia_0_d_valid.value) == 1:
       break
   else:
     assert False, f"Timeout waiting for op_access_ack"
@@ -64,11 +64,11 @@ async def a_get32(dut, addr) -> int:
   await a_op32(dut, addr, 0, op_get)
   for _ in range(10):
     await RisingEdge(dut.clock)
-    if dut.toaia_0_d_bits_opcode == op_access_ack_data and dut.toaia_0_d_valid == 1:
+    if int(dut.toaia_0_d_bits_opcode.value) == op_access_ack_data and int(dut.toaia_0_d_valid.value) == 1:
       break
   else:
     assert False, f"Timeout waiting for op_access_ack_data"
-  odata = int(dut.toaia_0_d_bits_data)
+  odata = int(dut.toaia_0_d_bits_data.value)
   res = odata if addr%4==0 else odata>>32
   return res & 0xffffffff
 
@@ -81,7 +81,7 @@ async def interrupt(dut, i):
   if EnableImsicAsyncBridge ==1 :
     for _ in range(15):
       await FallingEdge(dut.clock)
-      if dut.toCSR0_topeis_0 == wrap_topei(i):
+      if int(dut.toCSR0_topeis_0.value) == wrap_topei(i):
         break
     else:
       assert False, f"Timeout waiting for toCSR0_topeis_0 == wrap_topei({i})"
@@ -89,7 +89,7 @@ async def interrupt(dut, i):
     for _ in range(10):
       await FallingEdge(dut.clock)
       await FallingEdge(dut.clock)
-      if dut.toCSR0_topeis_0 == wrap_topei(i):
+      if int(dut.toCSR0_topeis_0.value) == wrap_topei(i):
         break
     else:
       assert False, f"Timeout waiting for toCSR0_topeis_0 == wrap_topei({i})"
@@ -122,7 +122,7 @@ async def s_int(dut, intnum, imsicID=1):
 
 async def v_int_vgein(dut, intnum, imsicID=1, guestID=2):
   """Issue an interrupt to the VS-mode interrupt file with vgein2."""
-  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*(1+guestID), intnum)
+  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*guestID, intnum)
   await RisingEdge(dut.clock)
 
 async def claim(dut, imsicID=1):
@@ -160,11 +160,19 @@ async def write_csr(dut, miselect, data, imsicID=1):
 async def read_csr(dut, miselect, imsicID=1):
   fromCSRx_addr_valid = getattr(dut, f"fromCSR{imsicID}_addr_valid")
   fromCSRx_addr_bits  = getattr(dut, f"fromCSR{imsicID}_addr_bits_addr" )
+  toCSRx_rdata_valid = getattr(dut, f"toCSR{imsicID}_rdata_valid")
+  toCSRx_rdata_bits  = getattr(dut, f"toCSR{imsicID}_rdata_bits")
   await FallingEdge(dut.clock)
   fromCSRx_addr_valid.value = 1
   fromCSRx_addr_bits.value = miselect
-  await FallingEdge(dut.clock)
+  for _ in range(10):
+    await FallingEdge(dut.clock)
+    if int(toCSRx_rdata_valid.value) == 1:
+      rdata = int(toCSRx_rdata_bits.value)
+      fromCSRx_addr_valid.value = 0
+      return rdata
   fromCSRx_addr_valid.value = 0
+  assert False, "Timeout waiting for rdata_valid == 1"
 
 async def select_m_intfile(dut, imsicID=1):
   fromCSRx_priv = getattr(dut, f"fromCSR{imsicID}_addr_bits_priv")
