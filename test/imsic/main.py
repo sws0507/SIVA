@@ -138,6 +138,20 @@ async def imsic_1_test(dut):
   await select_m_intfile(dut)
   cocotb.log.info("simple_supervisor_level end")
 
+  # Secure supervisor level uses a separate S interrupt file.
+  cocotb.log.info("secure_supervisor_level began")
+  await select_s_intfile(dut, secure=1)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(0)
+  await s_int(dut, 201, secure=1)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(201)
+  await select_s_intfile(dut)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_topeis_1.value) != wrap_topei(201)
+  await select_m_intfile(dut)
+  cocotb.log.info("secure_supervisor_level end")
+
   # Virtualized supervisor level test (vgein=2)
   cocotb.log.info("simple_virtualized_supervisor_level:vgein2 began")
   await select_vs_intfile(dut, 2)
@@ -149,6 +163,24 @@ async def imsic_1_test(dut):
   await select_m_intfile(dut)
   assert int(dut.toCSR1_topeis_2.value) == wrap_topei(137)
   cocotb.log.info("simple_virtualized_supervisor_level:vgein2 end")
+
+  # Secure bitmap gate for VS interrupt files
+  cocotb.log.info("secure_bitmap_vs began")
+  await select_m_intfile(dut, secure=1)
+  await write_csr(dut, csr_addr_intfile_bitmap, 1 << 5)
+  await select_vs_intfile(dut, 3)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(0)
+  await v_int_vgein(dut, 88, guestID=3)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(0)
+  await v_int_vgein(dut, 88, guestID=3, secure=1)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(88)
+  await select_m_intfile(dut)
+  cocotb.log.info("secure_bitmap_vs end")
 
   # Illegal iselect test
   cocotb.log.info("illegal:iselect began")

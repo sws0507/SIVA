@@ -75,6 +75,7 @@ async def aplic_write_read_test(dut):
   await write_read_check_2(dut, aplic_m_base_addr+offset_readonly0+1*4, 0xdeadbeef, 0)
   await write_read_check_2(dut, aplic_m_base_addr+offset_mmsiaddrcfgh, 0xdeadbeef, 0x80000000)
   await write_read_check_2(dut, aplic_m_base_addr+offset_smsiaddrcfgh, 0xdeadbeef, 0)
+  await write_read_check_1(dut, aplic_m_base_addr+offset_intSrc_bitmap+1*4, 0x800)
 
 @cocotb.test()
 async def aplic_set_clr_test(dut):
@@ -218,6 +219,7 @@ async def aplic_msi_test(dut):
   eiid = 0xCA
   guest_id = 2
   await a_put_full32(dut, aplic_m_base_addr+offset_targets+(int_num-1)*4, (guest_id<<12)|eiid)
+  await a_put_full32(dut, aplic_m_base_addr+offset_intSrc_bitmap+0*4, 1<<int_num)
   await a_put_full32(dut, aplic_m_base_addr+offset_seties+0*4, 0xffffffff)
   await a_put_full32(dut, aplic_m_base_addr+offset_setipnum, int_num)
   await expect_int_num(dut, eiid, imsic_m_base_addr) # guest_id is not worked in machine-level domain
@@ -245,6 +247,7 @@ async def aplic_msi_test(dut):
   int_num = 43
   eiid = 0xAB
   guest_id = 3
+  await a_put_full32(dut, aplic_m_base_addr+offset_intSrc_bitmap+1*4, 0)
   await a_put_full32(dut, aplic_m_base_addr+offset_sourcecfg+(int_num-1)*4, 1<<10)
   await a_put_full32(dut, aplic_m_base_addr+offset_targets+(int_num-1)*4, eiid)
   await a_put_full32(dut, aplic_m_base_addr+offset_seties+1*4, 1<<(int_num-32))
@@ -258,3 +261,13 @@ async def aplic_msi_test(dut):
   await FallingEdge(dut.clock)
   dut.intSrcs_43.value = 0
   await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id)
+
+  # Secure delegated source should target the +0x800 IMSIC alias in the SG domain.
+  eiid = 0x5A
+  await a_put_full32(dut, aplic_sg_base_addr+offset_targets+(int_num-1)*4, (guest_id<<12)|eiid)
+  await a_put_full32(dut, aplic_m_base_addr+offset_intSrc_bitmap+1*4, 1<<(int_num-32))
+  await FallingEdge(dut.clock)
+  dut.intSrcs_43.value = 1
+  await FallingEdge(dut.clock)
+  dut.intSrcs_43.value = 0
+  await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id+0x800)

@@ -101,6 +101,7 @@ class AddrBundle(params: IMSICParams) extends  Bundle {
 class CSRToIMSICBundle(params: IMSICParams) extends Bundle {
   val addr  = new AddrBundle(params)
   val vgein = UInt(params.vgeinWidth.W)
+  val sec   = Bool()
   val wdata = ValidIO(new Bundle {
     val op   = OpType()
     val data = UInt(params.xlen.W)
@@ -143,7 +144,7 @@ case class IMSICParams(
       "must not be less than log2(64)=6, as there must be at least 64 eip/eie bits"
   )
   lazy val privNum:     Int = 3          // number of privilege modes: machine, supervisor, virtualized supervisor
-  lazy val intFilesNum: Int = 2 + geilen // number of interrupt files, m, s, vs0, vs1, ...
+  lazy val intFilesNum: Int = 3 + geilen // number of interrupt files, m, s-ree, s-tee, vs1, ...
 
   lazy val eixNum: Int = pow2(imsicIntSrcWidth).toInt / xlen // number of eip/eie registers
   lazy val intFileMemWidth: Int = 12 // interrupt file memory region width: 12-bit width => 4KB size
@@ -157,7 +158,8 @@ case class IMSICParams(
     f"iselectWidth=${iselectWidth} needs to be able to cover addr [0x70, 0xFF], that is from CSR eidelivery to CSR eie63"
   )
   lazy val INTP_FILE_WIDTH = log2Ceil(intFilesNum)
-  lazy val MSI_INFO_WIDTH  = imsicIntSrcWidth + INTP_FILE_WIDTH
+  lazy val MSI_SEC_WIDTH   = 1
+  lazy val MSI_INFO_WIDTH  = imsicIntSrcWidth + INTP_FILE_WIDTH + MSI_SEC_WIDTH
 }
 
 class IMSIC(
@@ -171,6 +173,7 @@ class IMSIC(
     val msiio = IO(new MSITransBundle(params))
     val msi_data_o  = IO(Output(UInt(params.imsicIntSrcWidth.W)))
     val msi_valid_o = IO(Output(UInt(params.intFilesNum.W)))
+    val intFile_bitmap = IO(Input(UInt(params.intFilesNum.W)))
 
     // === main body ===
     val msi_in = Wire(UInt(params.MSI_INFO_WIDTH.W))
@@ -194,9 +197,18 @@ class IMSIC(
     val msi_intf_valids = RegInit(0.U(params.intFilesNum.W))
     msi_data_o  := msi_data_catch(params.imsicIntSrcWidth - 1, 0)
     msi_valid_o := msi_intf_valids // multi-bis switch vector
+    val msi_sec = msi_in(params.MSI_INFO_WIDTH - 1)
+    val msi_intfile = msi_in(
+      params.imsicIntSrcWidth + params.INTP_FILE_WIDTH - 1,
+      params.imsicIntSrcWidth
+    )
+    val msi_intnum = msi_in(params.imsicIntSrcWidth - 1, 0)
+    val msi_is_vs = msi_intfile >= 3.U
+    val msi_sec_match = msi_sec === intFile_bitmap(msi_intfile)
+    val msi_allowed = !msi_is_vs || msi_sec_match
     when(msi_vld_ris_cpu) {
-      msi_data_catch := msi_in(params.imsicIntSrcWidth - 1, 0)
-      msi_intf_valids := 1.U << msi_in(params.MSI_INFO_WIDTH - 1,params.imsicIntSrcWidth)
+      msi_data_catch := msi_intnum
+      msi_intf_valids := Mux(msi_allowed, 1.U << msi_intfile, 0.U)
     }.otherwise {
       msi_intf_valids := 0.U
     }
@@ -337,6 +349,12 @@ class IMSIC(
   val fromCSR = IO(Input(new CSRToIMSICBundle(params)))
   val msiio   = IO(new MSITransBundle(params))
   val illegal_priv = WireInit(false.B)
+  val intFile_bitmap = RegInit(0.U(params.intFilesNum.W))
+  val intFileBitmapAddr = 0x74.U(params.iselectWidth.W)
+  val accessIntFileBitmap = fromCSR.addr.valid && fromCSR.addr.bits.addr === intFileBitmapAddr
+  val canAccessIntFileBitmap = fromCSR.sec &&
+    fromCSR.addr.bits.priv.asUInt === PrivType.M.asUInt &&
+    fromCSR.addr.bits.virt === false.B
 
   private val intFilesSelOH_r = WireDefault(0.U(params.intFilesNum.W))
   private val intFilesSelOH_w = WireDefault(0.U(params.intFilesNum.W))
@@ -359,22 +377,22 @@ class IMSIC(
         }
       }
     }
-    when (fromCSR.addr.valid && !illegal_priv) // read
+    when (fromCSR.addr.valid && !illegal_priv && !accessIntFileBitmap) // read
     {
       val pv = Cat(fromCSR.addr.bits.priv.asUInt, fromCSR.addr.bits.virt)
       when(pv === Cat(PrivType.M.asUInt, false.B)){intFilesSelOH_r := UIntToOH(0.U)}
-        .elsewhen(pv === Cat(PrivType.S.asUInt, false.B)){intFilesSelOH_r := UIntToOH(1.U)}
-        .elsewhen(pv === Cat(PrivType.S.asUInt, true.B)){intFilesSelOH_r := UIntToOH(1.U((fromCSR.vgein.getWidth+1).W)
-         + fromCSR.vgein.pad(params.vgeinWidth+1))
+        .elsewhen(pv === Cat(PrivType.S.asUInt, false.B)){intFilesSelOH_r := UIntToOH(Mux(fromCSR.sec, 2.U, 1.U), params.intFilesNum)}
+        .elsewhen(pv === Cat(PrivType.S.asUInt, true.B)){intFilesSelOH_r := UIntToOH(2.U((fromCSR.vgein.getWidth+2).W)
+         + fromCSR.vgein.pad(params.vgeinWidth+2))
       }
     }
-    when (fromCSR.addr.valid && fromCSR.wdata.valid && !(fromCSR.wdata.bits.op.asUInt === 0.U) && !illegal_priv) // write
+    when (fromCSR.addr.valid && fromCSR.wdata.valid && !(fromCSR.wdata.bits.op.asUInt === 0.U) && !illegal_priv && !accessIntFileBitmap) // write
     {
         val pv = Cat(fromCSR.addr.bits.priv.asUInt, fromCSR.addr.bits.virt)
         when(pv === Cat(PrivType.M.asUInt, false.B)){intFilesSelOH_w := UIntToOH(0.U)}
-        .elsewhen(pv === Cat(PrivType.S.asUInt, false.B)){intFilesSelOH_w := UIntToOH(1.U)}
-        .elsewhen(pv === Cat(PrivType.S.asUInt, true.B)){intFilesSelOH_w := UIntToOH(1.U((fromCSR.vgein.getWidth+1).W)
-         + fromCSR.vgein.pad(params.vgeinWidth+1))
+        .elsewhen(pv === Cat(PrivType.S.asUInt, false.B)){intFilesSelOH_w := UIntToOH(Mux(fromCSR.sec, 2.U, 1.U), params.intFilesNum)}
+        .elsewhen(pv === Cat(PrivType.S.asUInt, true.B)){intFilesSelOH_w := UIntToOH(2.U((fromCSR.vgein.getWidth+2).W)
+         + fromCSR.vgein.pad(params.vgeinWidth+2))
         }
     }
   }
@@ -384,14 +402,15 @@ class IMSIC(
   // instance and connect IMSICGateWay.
   val imsicGateWay = Module(new IMSICGateWay)
   imsicGateWay.msiio <> msiio
+  imsicGateWay.intFile_bitmap := intFile_bitmap
   val pendings = Wire(Vec(params.intFilesNum,Bool()))
   val vec_rdata = Wire(Vec(params.intFilesNum, ValidIO(UInt(params.xlen.W))))
-  Seq(1, 1 + params.geilen).zipWithIndex.map {
+  Seq(1, 2 + params.geilen).zipWithIndex.map {
     case (intFilesNum: Int, i: Int) => {
       // j: index for S intFile: S, G1, G2, ...
       val maps = (0 until intFilesNum).map { j =>
         val flati = i + j
-        val pi    = if (flati > 2) 2 else flati // index for privileges: M, S, VS.
+        val pi    = if (flati > 2) 2 else if (flati > 0) 1 else 0 // index for privileges: M, S, VS.
 
         def sel_addr(old: AddrBundle): AddrBundle = {
           val new_ = Wire(new AddrBundle(params))
@@ -410,7 +429,7 @@ class IMSIC(
 
         val intFile = Module(new IntFile)
         // Preventing overflow
-        when (flati.U((params.vgeinWidth + 1).W) === fromCSR.vgein.pad(params.vgeinWidth + 1)+1.U) {
+        when (flati.U((params.vgeinWidth + 2).W) === fromCSR.vgein.pad(params.vgeinWidth + 2)+2.U) {
           intFile.fromCSR.vgein := fromCSR.vgein
         } .otherwise {
           intFile.fromCSR.vgein := 0.U
@@ -433,8 +452,26 @@ class IMSIC(
       }
     }
   }
-  toCSR.rdata.valid   := vec_rdata.map(_.valid).reduce(_|_)
-  toCSR.rdata.bits    := vec_rdata.map(_.bits).reduce(_|_)
+  val intFileRdataValid = vec_rdata.map(_.valid).reduce(_|_)
+  val intFileRdataBits = vec_rdata.map(_.bits).reduce(_|_)
+  val bitmapRdataValid = RegNext(accessIntFileBitmap && canAccessIntFileBitmap)
+  val bitmapRdataBits = RegNext(intFile_bitmap.pad(params.xlen))
+  toCSR.rdata.valid   := Mux(bitmapRdataValid, true.B, intFileRdataValid)
+  toCSR.rdata.bits    := Mux(bitmapRdataValid, bitmapRdataBits, intFileRdataBits)
+  val illegalIntFileBitmapAccess = accessIntFileBitmap && !canAccessIntFileBitmap
+  when(accessIntFileBitmap && fromCSR.wdata.valid && canAccessIntFileBitmap) {
+    switch(fromCSR.wdata.bits.op) {
+      is(OpType.CSRRW) {
+        intFile_bitmap := fromCSR.wdata.bits.data(params.intFilesNum - 1, 0)
+      }
+      is(OpType.CSRRS) {
+        intFile_bitmap := intFile_bitmap | fromCSR.wdata.bits.data(params.intFilesNum - 1, 0)
+      }
+      is(OpType.CSRRC) {
+        intFile_bitmap := intFile_bitmap & ~fromCSR.wdata.bits.data(params.intFilesNum - 1, 0)
+      }
+    }
+  }
   toCSR.pendings := (pendings.zipWithIndex.map{case (p,i) => p << i.U}).reduce(_ | _) //vector -> multi-bit
   locally {
     // Format of *topei:
@@ -449,15 +486,16 @@ class IMSIC(
     }
     val pv = Cat(fromCSR.addr.bits.priv.asUInt, fromCSR.addr.bits.virt)
     toCSR.topeis(0) := wrap(topeis_forEachIntFiles(0)) // m
-    toCSR.topeis(1) := wrap(topeis_forEachIntFiles(1)) // s
+    toCSR.topeis(1) := wrap(Mux(fromCSR.sec, topeis_forEachIntFiles(2), topeis_forEachIntFiles(1))) // s
     toCSR.topeis(2) := wrap(ParallelMux(
       UIntToOH(fromCSR.vgein - 1.U, params.geilen).asBools,
-      topeis_forEachIntFiles.drop(2)
+      topeis_forEachIntFiles.drop(3)
     )) // vs
   }  
   val toCSR_illegal_d = RegNext((fromCSR.addr.valid | fromCSR.wdata.valid) & Seq(
     illegals_forEachIntFiles.reduce(_ | _),
     (fromCSR.wdata.valid && fromCSR.wdata.bits.op.asUInt === 0.U),
+    illegalIntFileBitmapAccess,
     illegal_priv
   ).reduce(_ | _))
   toCSR.illegal := toCSR_illegal_d
@@ -922,32 +960,66 @@ class RegGen(
   }))
   val valids       = WireInit(VecInit(Seq.fill(params.intFilesNum)(false.B)))
   val seteipnums   = WireInit(VecInit(Seq.fill(params.intFilesNum)(0.U(params.imsicIntSrcWidth.W))))
+  val seteipsecs   = WireInit(VecInit(Seq.fill(params.intFilesNum)(false.B)))
   val outseteipnum = RegInit(0.U(params.MSI_INFO_WIDTH.W))
   val outvalids    = RegInit(VecInit(Seq.fill(params.intFilesNum)(false.B)))
 
-  (regmapIOs zip Seq(1, 1 + params.geilen)).zipWithIndex.map { // seq[0]: m interrupt file, seq[1]: s&vs interrupt file
+  (regmapIOs zip Seq(1, 1 + params.geilen)).zipWithIndex.map { // seq[0]: m interrupt file, seq[1]: s address slot and vs address slots
     case ((regmapIO: (DecoupledIO[RegMapperInput], DecoupledIO[RegMapperOutput]), intFilesNum: Int), i: Int) =>
       {
-        // j: index is 0 for m file for seq[0],index is 0~params.geilen for S intFile for seq[1]: S, G1, G2, ...
-        val maps = (0 until intFilesNum).map { j =>
-          val flati = i + j // seq[0]:0+0=0;seq[1]:(0~geilen)+1
-          val seteipnum = WireInit(0.U.asTypeOf(Valid(UInt(params.imsicIntSrcWidth.W))));
-          dontTouch(seteipnum)
-          valids(flati)     := seteipnum.valid
-          seteipnums(flati) := seteipnum.bits
-          j * pow2(params.intFileMemWidth).toInt -> Seq(RegField(
-            32,
-            0.U,
-            RegWriteFn { (valid, data) =>
-              when(valid) { seteipnum.bits := data(params.imsicIntSrcWidth - 1, 0); seteipnum.valid := true.B }; true.B
-            }
-          ))
+        // j: index is 0 for m file for seq[0]; for seq[1], j=0 is S, j=1..geilen are VS1..VSgeilen.
+        val maps = (0 until intFilesNum).flatMap { j =>
+          def msiEntry(offset: Int, sec: Bool) = {
+            val seteipnum = WireInit(0.U.asTypeOf(Valid(UInt(params.imsicIntSrcWidth.W))));
+            dontTouch(seteipnum)
+            val entry = offset -> Seq(RegField(32, 0.U, RegWriteFn { (valid, data) =>
+              when(valid) {
+                seteipnum.bits := data(params.imsicIntSrcWidth - 1, 0)
+                seteipnum.valid := true.B
+              }
+              true.B
+            }))
+            (entry, seteipnum, sec)
+          }
+          val reeOffset = j * pow2(params.intFileMemWidth).toInt
+          val teeOffset = reeOffset + pow2(params.intFileMemWidth - 1).toInt
+          if (i == 0) {
+            val (reeEntry, reeSeteipnum, _) = msiEntry(reeOffset, false.B)
+            valids(0)     := reeSeteipnum.valid
+            seteipnums(0) := reeSeteipnum.bits
+            seteipsecs(0) := false.B
+            Seq(reeEntry)
+          } else if (j == 0) {
+            val (reeEntry, reeSeteipnum, _) = msiEntry(reeOffset, false.B)
+            val (teeEntry, teeSeteipnum, _) = msiEntry(teeOffset, true.B)
+            valids(1)     := reeSeteipnum.valid
+            seteipnums(1) := reeSeteipnum.bits
+            seteipsecs(1) := false.B
+            valids(2)     := teeSeteipnum.valid
+            seteipnums(2) := teeSeteipnum.bits
+            seteipsecs(2) := true.B
+            Seq(
+              reeEntry,
+              teeEntry
+            )
+          } else {
+            val vsFlati = j + 2
+            val (reeEntry, reeSeteipnum, _) = msiEntry(reeOffset, false.B)
+            val (teeEntry, teeSeteipnum, _) = msiEntry(teeOffset, true.B)
+            valids(vsFlati)     := reeSeteipnum.valid | teeSeteipnum.valid
+            seteipnums(vsFlati) := Mux(teeSeteipnum.valid, teeSeteipnum.bits, reeSeteipnum.bits)
+            seteipsecs(vsFlati) := teeSeteipnum.valid
+            Seq(
+              reeEntry,
+              teeEntry
+            )
+          }
         }
         regmapIO._2 <> RegMapper(beatBytes, 1, true, regmapIO._1, maps: _*)
       }
       for (i <- 0 until params.intFilesNum) {
         when(valids(i)) {
-          outseteipnum := Cat(i.U, seteipnums(i))
+          outseteipnum := Cat(seteipsecs(i), i.U(params.INTP_FILE_WIDTH.W), seteipnums(i))
         }
       }
       outvalids    := valids

@@ -101,6 +101,7 @@ imsic_m_base_addr   = 0x61000000
 imsic_sg_base_addr  = 0x82900000
 csr_addr_eidelivery = 0x70
 csr_addr_eithreshold = 0x72
+csr_addr_intfile_bitmap = 0x74
 csr_addr_eip0 = 0x80
 csr_addr_eip2 = 0x82
 csr_addr_eie0 = 0xC0
@@ -110,19 +111,22 @@ op_csrrw = 1
 op_csrrs = 2
 op_csrrc = 3
 
-async def m_int(dut, intnum, imsicID=1):
+def sec_offset(secure):
+  return 0x800 if secure else 0
+
+async def m_int(dut, intnum, imsicID=1, secure=0):
   """Issue an interrupt to the M-mode interrupt file."""
   await a_put_full32(dut, imsic_m_base_addr+0x1000*imsicID, intnum)
   await RisingEdge(dut.clock)
 
-async def s_int(dut, intnum, imsicID=1):
+async def s_int(dut, intnum, imsicID=1, secure=0):
   """Issue an interrupt to the S-mode interrupt file."""
-  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID, intnum)
+  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID+sec_offset(secure), intnum)
   await RisingEdge(dut.clock)
 
-async def v_int_vgein(dut, intnum, imsicID=1, guestID=2):
+async def v_int_vgein(dut, intnum, imsicID=1, guestID=2, secure=0):
   """Issue an interrupt to the VS-mode interrupt file with vgein2."""
-  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*guestID, intnum)
+  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*guestID + sec_offset(secure), intnum)
   await RisingEdge(dut.clock)
 
 async def claim(dut, imsicID=1):
@@ -174,28 +178,37 @@ async def read_csr(dut, miselect, imsicID=1):
   fromCSRx_addr_valid.value = 0
   assert False, "Timeout waiting for rdata_valid == 1"
 
-async def select_m_intfile(dut, imsicID=1):
+async def select_m_intfile(dut, imsicID=1, secure=0):
   fromCSRx_priv = getattr(dut, f"fromCSR{imsicID}_addr_bits_priv")
   fromCSRx_virt = getattr(dut, f"fromCSR{imsicID}_addr_bits_virt")
+  fromCSRx_sec = getattr(dut, f"fromCSR{imsicID}_sec")
   await FallingEdge(dut.clock)
   fromCSRx_priv.value = 3
   fromCSRx_virt.value = 0
+  fromCSRx_sec.value = secure
+  await RisingEdge(dut.clock)
 
-async def select_s_intfile(dut, imsicID=1):
+async def select_s_intfile(dut, imsicID=1, secure=0):
   fromCSRx_priv = getattr(dut, f"fromCSR{imsicID}_addr_bits_priv")
   fromCSRx_virt = getattr(dut, f"fromCSR{imsicID}_addr_bits_virt")
+  fromCSRx_sec = getattr(dut, f"fromCSR{imsicID}_sec")
   await FallingEdge(dut.clock)
   fromCSRx_priv.value = 1
   fromCSRx_virt.value = 0
+  fromCSRx_sec.value = secure
+  await RisingEdge(dut.clock)
 
-async def select_vs_intfile(dut, vgein, imsicID=1):
+async def select_vs_intfile(dut, vgein, imsicID=1, secure=0):
   fromCSRx_priv = getattr(dut, f"fromCSR{imsicID}_addr_bits_priv")
   fromCSRx_vgein = getattr(dut, f"fromCSR{imsicID}_vgein")
   fromCSRx_virt = getattr(dut, f"fromCSR{imsicID}_addr_bits_virt")
+  fromCSRx_sec = getattr(dut, f"fromCSR{imsicID}_sec")
   await FallingEdge(dut.clock)
   fromCSRx_priv.value = 1
   fromCSRx_vgein.value = vgein
   fromCSRx_virt.value = 1
+  fromCSRx_sec.value = secure
+  await RisingEdge(dut.clock)
 
 async def init_imsic(dut, imsicID=1):
   await select_m_intfile(dut, imsicID)
@@ -203,6 +216,10 @@ async def init_imsic(dut, imsicID=1):
   for e in range(0,32):
     await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
   await select_s_intfile(dut, imsicID)
+  await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
+  for e in range(0,32):
+    await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
+  await select_s_intfile(dut, imsicID, secure=1)
   await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
   for e in range(0,32):
     await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
@@ -237,6 +254,7 @@ offset_setipnum_le  = 0x2000
 offset_setipnum_be  = 0x2004
 offset_genmsi       = 0x3000
 offset_targets      = 0x3004
+offset_intSrc_bitmap = 0x3400
 sourcecfg_sm_inactive = 0
 sourcecfg_sm_detached = 1
 sourcecfg_sm_edge1    = 4

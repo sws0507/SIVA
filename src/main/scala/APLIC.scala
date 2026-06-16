@@ -108,6 +108,7 @@ class APLIC(
     imsicBaseAddr: Long, // base address for imsic's interrupt files
     imsicMemberStrideWidth: Int, // C, D: stride between each interrupt files
     imsicGeilen: Int, // number of guest interrupt files, it is 0 for machine-level domain
+    hasIntSrcBitmapMMIO: Boolean = false,
   )(implicit p: Parameters) extends Module {
     override val desiredName = "Domain"
     class MSIBundle extends Bundle {
@@ -126,6 +127,8 @@ class APLIC(
     }})
     val intSrcs = IO(Input(Vec(params.intSrcNum, Bool())))
     val intSrcsDelegated = IO(Output(Vec(params.intSrcNum, Bool())))
+    val intSrcBitmapIn = IO(Input(Vec(params.intSrcNum, Bool())))
+    val intSrcBitmapOut = IO(Output(Vec(params.intSrcNum, Bool())))
 
     private val domaincfg = new Bundle {
       val high = 0x80.U(8.W)
@@ -199,6 +202,17 @@ class APLIC(
           regs(i).EIID := data(10,0)
       }}
     }
+    private val intSrcBitmapRegs = if (hasIntSrcBitmapMMIO) Some(RegInit(VecInit.fill(params.intSrcNum)(false.B))) else None
+    private val intSrc_bitmap = intSrcBitmapRegs.getOrElse(intSrcBitmapIn)
+    intSrcBitmapOut := intSrc_bitmap
+    def intSrcBitmapR32I(i: Int): UInt = Cat(intSrc_bitmap.slice(i * 32, i * 32 + 32).reverse)
+    def intSrcBitmapW32I(i: Int, data: UInt): Unit = {
+      intSrcBitmapRegs.foreach { regs =>
+        (0 until 32).foreach { j =>
+          regs(i * 32 + j) := data(j)
+        }
+      }
+    }
 
     // Writing ips priorities:
     // * 3st: regmapped regs: including setips, setipnum, in_clrips, clripnum
@@ -219,7 +233,13 @@ class APLIC(
         when (valid && data=/=0.U) { ixs.wBitUI(data(params.aplicIntSrcWidth-1,0), setclr) }; true.B })
       def RWF_clrixs(i:Int, ixs:IXs) = RegWriteFn((valid, data) => {
         when (valid) { ixs.w32I(i, ixs.r32I(i) & ~data) }; true.B })
-      io.regmapOut <> RegMapper(beatBytes, 1, true, io.regmapIn,
+      val intSrcBitmapMap = if (hasIntSrcBitmapMMIO) {
+        Seq(0x3400 -> (0 until params.ixNum).map(i => RegField(32, intSrcBitmapR32I(i),
+          RegWriteFn((v, d)=>{ when(v){intSrcBitmapW32I(i, d)}; true.B }))))
+      } else {
+        Seq.empty
+      }
+      io.regmapOut <> RegMapper(beatBytes, 1, true, io.regmapIn, (Seq(
         /*domaincfg*/   0x0000 -> Seq(RegField(32, domaincfg.r, RegWriteFn((v, d)=>{ when(v){domaincfg.w(d)}; true.B }))),
         /*sourcecfgs*/  0x0004 -> (1 until params.intSrcNum).map(i => RegField(32, sourcecfgs.rI(i),
           RegWriteFn((v, d)=>{ when(v){sourcecfgs.wI(i, d)}; true.B }))),
@@ -237,7 +257,7 @@ class APLIC(
         /*genmsi*/      0x3000 -> Seq(RegField(32, genmsi.r, RegWriteFn((v,d)=>{ when(v){genmsi.w(d)}; true.B }))),
         /*targets*/     0x3004 -> (1 until params.intSrcNum).map(i => RegField(32, targets.rI(i),
           RegWriteFn((v, d)=>{ when(v){targets.wI(i, d)}; true.B }))),
-      )
+      ) ++ intSrcBitmapMap): _*)
     }
 
     private val intSrcsSynced = RegNextN(intSrcs, 3)
@@ -276,21 +296,24 @@ class APLIC(
       val idle :: waiting_ack :: Nil = Enum(2)
       val state = RegInit(idle)
 
-      def getMSIAddr(HartIndex:UInt, guestID:UInt): UInt = {
+      def getMSIAddr(HartIndex:UInt, guestID:UInt, secureSource: Bool): UInt = {
         val groupID = if (params.groupsWidth == 0) 0.U
           else HartIndex(params.groupsWidth+params.membersWidth-1, params.membersWidth)
         val memberID = if (params.membersWidth == 0) 0.U
           else HartIndex(params.membersWidth-1, 0)
         // It is recommended to hardwire *msiaddrcfg* by the manual:
         // "For any given system, these addresses are fixed and should be hardwired into the APLIC if possible."
-        imsicBaseAddr.U |
+        val base = imsicBaseAddr.U(64.W) |
           (groupID<<params.groupStrideWidth) |
           (memberID<<imsicMemberStrideWidth) |
           (guestID<<params.intFileMemWidth)
+        val secureOffset = if (imsicGeilen == 0) 0.U(64.W)
+          else Mux(secureSource, (1 << (params.intFileMemWidth - 1)).U(64.W), 0.U(64.W))
+        base + secureOffset
       }
-      val genmsiBits = MSIBundle(getMSIAddr(genmsi.HartIndex, 0.U), genmsi.EIID)
+      val genmsiBits = MSIBundle(getMSIAddr(genmsi.HartIndex, 0.U, false.B), genmsi.EIID)
       val target = targets.regs(topi)
-      val topiBits = MSIBundle(getMSIAddr(target.HartIndex, target.GuestIndex), target.EIID)
+      val topiBits = MSIBundle(getMSIAddr(target.HartIndex, target.GuestIndex, intSrc_bitmap(topi)), target.EIID)
 
       // A pending extempore MSI (genmsi) should be sent by the APLIC with minimal delay.
       io.msi.bits := Mux(genmsi.Busy, genmsiBits, topiBits)
@@ -314,6 +337,7 @@ class APLIC(
     params.mBaseAddr,
     params.mStrideWidth,
     0,
+    hasIntSrcBitmapMMIO = true,
   )), Module(new Domain(
     params.baseAddr + pow2(params.domainMemWidth),
     params.sgBaseAddr,
@@ -325,6 +349,8 @@ class APLIC(
   val intSrcs = IO(Input(Vec(params.intSrcNum, Bool())))
   domains(0).intSrcs := intSrcs
   domains(1).intSrcs := domains(0).intSrcsDelegated
+  domains(0).intSrcBitmapIn := VecInit.fill(params.intSrcNum)(false.B)
+  domains(1).intSrcBitmapIn := domains(0).intSrcBitmapOut
 }
 
 class TLAPLIC(
