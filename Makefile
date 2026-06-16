@@ -1,14 +1,15 @@
 .NOTINTERMEDIATE:
 # export MILL_JVM_OPTS="-Xmx16G"
+MILL ?= mill
 testcases=$(shell ls test/*/main.py | awk -F '/' '{print $$2}')
 default: $(addprefix run-,$(testcases))
 
 gen=gen/filelist.f
 gen_axi=gen_axi/filelist.f
 $(gen): $(wildcard src/main/scala/*)
-	mill TLAIA
+	$(MILL) TLAIA
 $(gen_axi): $(wildcard src/main/scala/*)
-	mill AXI4AIA
+	$(MILL) AXI4AIA
 
 compile=test/sim_build/Vtop
 compile_axi=test/sim_build_axi/Vtop
@@ -24,9 +25,9 @@ endef
 $(foreach testcase,$(testcases),$(eval $(call RUN_TESTCASE,$(testcase))))
 # `ulimit -s` make sure stack size is enough
 run-%: test/%/main.py $(compile)
-	ulimit -s 211487 && make -C test/$(subst run-,,$@)
+	ulimit -s 211487 2>/dev/null || true; $(MAKE) -C test/$(subst run-,,$@)
 run-axi: test/axi/main.py $(compile_axi)
-	ulimit -s 211487 && make -C test/$(subst run-,,$@)
+	ulimit -s 211487 2>/dev/null || true; $(MAKE) -C test/$(subst run-,,$@)
 
 clean:
 	rm -rf out/ gen*/ test/sim_build*/

@@ -4,6 +4,17 @@
 out
 .bloop
 
+# for local Mill wrapper and caches
+/mill
+/.mill-cache/
+/.mill-home/
+
+# for local Python virtual environments
+.venv/
+
+# for macOS Finder metadata
+.DS_Store
+
 # for chisel generated files
 *.fir
 gen*
