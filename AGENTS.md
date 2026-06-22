@@ -8,6 +8,8 @@ SIVA is a Chisel implementation of RISC-V AIA with security-oriented interrupt v
 
 This branch targets a simple Smmtt/Smsdia prototype. Prefer extending the AIA programming model instead of duplicating the whole interrupt subsystem. For a 2-domain design, model domain selection around IMSIC interrupt-file banking, MSI address decoding, CSR selection, and `msdcfg.SDICN`-style active-domain state. Keep M-level interrupt delivery singular and always active. Treat `HasTEEIMSIC` as prior art, but avoid making it the default design unless the change specifically needs a separate TEE IMSIC instance.
 
+Before making Smmtt changes, check `agents/PLAN.md` for the active plan and follow entries marked as `in progress` unless the user says otherwise.
+
 ## Build, Test, and Development Commands
 
 Use `nix-shell` or direnv before building. Run `make -j` to generate Verilog with Mill and run all Cocotb tests. Use focused targets while iterating:
