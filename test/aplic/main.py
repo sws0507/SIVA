@@ -257,4 +257,4 @@ async def aplic_msi_test(dut):
   dut.intSrcs_43.value = 1
   await FallingEdge(dut.clock)
   dut.intSrcs_43.value = 0
-  await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id)
+  await expect_int_num(dut, eiid, imsic_sg_file_addr(imsicID=0, domain=0, guestID=guest_id))

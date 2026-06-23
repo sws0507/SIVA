@@ -56,6 +56,8 @@ case class APLICParams(
   groupsNum       : Int  = 1           ,
   //MC 👉 客户中断文件的数量（Number of guest interrupt files）:
   geilen          : Int  = 7           ,
+  // Number of supervisor-domain interrupt-controller banks for simple Smsdia.
+  supervisorDomains: Int = 2           ,
   //MC{hide}
   //MC{hide}
 ) {
@@ -68,7 +70,9 @@ case class APLICParams(
   // require(mStrideWidth >= intFileMemWidth)
   lazy val mStrideWidth    : Int  = intFileMemWidth // C: stride between each machine-level interrupt files
   // require(sgStrideWidth >= log2Ceil(geilen+1) + intFileMemWidth)
-  lazy val sgStrideWidth   : Int = log2Ceil(geilen+1) + intFileMemWidth // D: stride between each supervisor- and guest-level interrupt files
+  require(supervisorDomains >= 1 && supervisorDomains <= 63)
+  lazy val sgFilesNum      : Int = supervisorDomains * (geilen + 1)
+  lazy val sgStrideWidth   : Int = log2Ceil(sgFilesNum) + intFileMemWidth // D: stride between banked supervisor- and guest-level interrupt files
   // require(groupStrideWidth >= k + math.max(mStrideWidth, sgStrideWidth))
   lazy val membersWidth    : Int = log2Ceil(membersNum) // k
   require((mBaseAddr & (pow2(membersWidth + mStrideWidth) -1)) == 0, "mBaseAddr should be aligned to a 2^(k+C)")
@@ -108,6 +112,7 @@ class APLIC(
     imsicBaseAddr: Long, // base address for imsic's interrupt files
     imsicMemberStrideWidth: Int, // C, D: stride between each interrupt files
     imsicGeilen: Int, // number of guest interrupt files, it is 0 for machine-level domain
+    imsicSupervisorDomains: Int = 1,
   )(implicit p: Parameters) extends Module {
     override val desiredName = "Domain"
     class MSIBundle extends Bundle {
@@ -185,7 +190,7 @@ class APLIC(
     private val targets = new Bundle {
       class Target extends Bundle {
         val HartIndex  = UInt(params.groupsWidth.W + params.membersWidth.W)
-        val GuestIndex = UInt(if (imsicGeilen==0) 0.W else log2Ceil(imsicGeilen).W)
+        val GuestIndex = UInt(if (imsicGeilen==0) 0.W else log2Ceil(imsicSupervisorDomains * (imsicGeilen + 1)).W)
         val EIID       = UInt(params.imsicIntSrcWidth.W)
       }
       val regs = RegInit(VecInit.fill(params.intSrcNum){0.U.asTypeOf(new Target)})
@@ -319,6 +324,7 @@ class APLIC(
     params.sgBaseAddr,
     params.sgStrideWidth,
     params.geilen,
+    params.supervisorDomains,
   )))
   val ios = domains.map(d => { val io = IO(d.io.cloneType); io <> d.io; io })
 

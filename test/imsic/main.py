@@ -150,6 +150,46 @@ async def imsic_1_test(dut):
   assert int(dut.toCSR1_topeis_2.value) == wrap_topei(137)
   cocotb.log.info("simple_virtualized_supervisor_level:vgein2 end")
 
+  # Simple Smmtt/Smsdia two-domain test
+  cocotb.log.info("simple_smmtt_two_domain began")
+  await set_sdicn(dut, 2)
+  await select_s_intfile(dut)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(0)
+  await s_int_domain(dut, 77, domain=1)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(77)
+
+  await select_vs_intfile(dut, 2)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(0)
+  await v_int_vgein(dut, 138, domain=1)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(138)
+
+  await set_sdicn(dut, 1)
+  await select_s_intfile(dut)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(1234%256)
+  await select_vs_intfile(dut, 2)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(137)
+
+  assert int(dut.toCSR1_msdeip.value) & 0b110 == 0b110
+  await set_msdeie(dut, 1 << 2)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_lsdeip.value) == 1
+  await set_msdeie(dut, 0)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_lsdeip.value) == 0
+
+  await set_sdicn(dut, 0)
+  await select_s_intfile(dut)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(0)
+  await write_csr(dut, csr_addr_eidelivery, 1)
+  assert int(dut.toCSR1_illegal.value) == 1
+  await set_sdicn(dut, 1)
+  await select_m_intfile(dut)
+  cocotb.log.info("simple_smmtt_two_domain passed")
+
   # Illegal iselect test
   cocotb.log.info("illegal:iselect began")
   # await write_csr_op(dut, 0x71, 0xc0, op_csrrs)
