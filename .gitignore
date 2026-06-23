@@ -8,6 +8,8 @@ out
 /mill
 /.mill-cache/
 /.mill-home/
+/.cache/
+/.home/
 
 # for local Python virtual environments
 .venv/

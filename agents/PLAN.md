@@ -6,5 +6,5 @@ Unless explicitly stated otherwise, focus only on plans marked as in progress an
 
 ## Plans
 
-1. In progress: Remove the original `HasTEE` code and keep a clean AIA baseline for future modifications.
+1. Completed: Remove the original `HasTEE` code and keep a clean AIA baseline for future modifications.
 2. Not started: Implement a simple Smmtt.

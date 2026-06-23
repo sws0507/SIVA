@@ -1,14 +1,23 @@
 .NOTINTERMEDIATE:
 # export MILL_JVM_OPTS="-Xmx16G"
+SIVA_ROOT := $(CURDIR)
+CHISEL_FIRTOOL_PATH ?= /Users/sunweishi/Library/Caches/org.chipsalliance.llvm-firtool/1.62.0/bin/
+XDG_CACHE_HOME ?= $(SIVA_ROOT)/.cache
+COURSIER_CACHE ?= $(SIVA_ROOT)/.cache/coursier
+MILL_LOCAL_HOME ?= $(SIVA_ROOT)/.home
+PYTHONPATH := $(SIVA_ROOT)/test:$(PYTHONPATH)
+PATH := $(SIVA_ROOT)/.venv/bin:$(SIVA_ROOT):$(CHISEL_FIRTOOL_PATH):$(PATH)
+export CHISEL_FIRTOOL_PATH XDG_CACHE_HOME COURSIER_CACHE MILL_LOCAL_HOME PYTHONPATH PATH
+
 testcases=$(shell ls test/*/main.py | awk -F '/' '{print $$2}')
 default: $(addprefix run-,$(testcases))
 
 gen=gen/filelist.f
 gen_axi=gen_axi/filelist.f
 $(gen): $(wildcard src/main/scala/*)
-	mill TLAIA
+	$(SIVA_ROOT)/.venv/bin/mill TLAIA
 $(gen_axi): $(wildcard src/main/scala/*)
-	mill AXI4AIA
+	$(SIVA_ROOT)/.venv/bin/mill AXI4AIA
 
 compile=test/sim_build/Vtop
 compile_axi=test/sim_build_axi/Vtop
@@ -24,9 +33,11 @@ endef
 $(foreach testcase,$(testcases),$(eval $(call RUN_TESTCASE,$(testcase))))
 # `ulimit -s` make sure stack size is enough
 run-%: test/%/main.py $(compile)
-	ulimit -s 211487 && make -C test/$(subst run-,,$@)
+	# ulimit -s 211487 && make -C test/$(subst run-,,$@)
+	(ulimit -s 211487 2>/dev/null || true) && make -C test/$(subst run-,,$@)
 run-axi: test/axi/main.py $(compile_axi)
-	ulimit -s 211487 && make -C test/$(subst run-,,$@)
+	# ulimit -s 211487 && make -C test/$(subst run-,,$@)
+	(ulimit -s 211487 2>/dev/null || true) && make -C test/$(subst run-,,$@)
 
 clean:
 	rm -rf out/ gen*/ test/sim_build*/

@@ -2,11 +2,11 @@
 
 ## Project Structure and Module Organization
 
-SIVA is a Chisel implementation of RISC-V AIA with security-oriented interrupt virtualization work on this branch. Core RTL lives in `src/main/scala/`: `APLIC.scala` handles APLIC domains and MSI generation, `IMSIC.scala` handles interrupt files, CSR-facing behavior, and MSI receive logic, and `IMSICParameters.scala` carries global IMSIC options such as `HasTEEIMSIC`. Tests live under `test/aplic`, `test/imsic`, `test/integration`, and `test/axi`. Architecture notes and diagrams live in `docs/`; external specifications are kept in `reference/`.
+SIVA is a Chisel implementation of RISC-V AIA with security-oriented interrupt virtualization work on this branch. Core RTL lives in `src/main/scala/`: `APLIC.scala` handles APLIC domains and MSI generation, `IMSIC.scala` handles interrupt files, CSR-facing behavior, MSI receive logic, and IMSIC parameters. Tests live under `test/aplic`, `test/imsic`, `test/integration`, and `test/axi`. Architecture notes and diagrams live in `docs/`; external specifications are kept in `reference/`.
 
 ## Simple Smmtt Scope
 
-This branch targets a simple Smmtt/Smsdia prototype. Prefer extending the AIA programming model instead of duplicating the whole interrupt subsystem. For a 2-domain design, model domain selection around IMSIC interrupt-file banking, MSI address decoding, CSR selection, and `msdcfg.SDICN`-style active-domain state. Keep M-level interrupt delivery singular and always active. Treat `HasTEEIMSIC` as prior art, but avoid making it the default design unless the change specifically needs a separate TEE IMSIC instance.
+This branch targets a simple Smmtt/Smsdia prototype. Prefer extending the AIA programming model instead of duplicating the whole interrupt subsystem. For a 2-domain design, model domain selection around IMSIC interrupt-file banking, MSI address decoding, CSR selection, and `msdcfg.SDICN`-style active-domain state. Keep M-level interrupt delivery singular and always active. The legacy TEE-specific duplicate IMSIC path has been removed; keep the clean AIA baseline intact unless the user asks otherwise.
 
 Before making Smmtt changes, check `agents/PLAN.md` for the active plan and follow entries marked as `in progress` unless the user says otherwise.
 

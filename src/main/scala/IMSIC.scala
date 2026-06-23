@@ -85,11 +85,6 @@ class MSITransBundle(params: IMSICParams) extends Bundle {
   val data = Input(UInt(params.MSI_INFO_WIDTH.W))
   val vld_ack = Output(Bool())  // ack for axireg from imsic. which indicates imsic can work actively.
 }
-class ForCVMBundle extends Bundle {
-  val cmode = Input(Bool()) // add port: cpu mode is tee or ree
-  val notice_pending =
-    Output(Bool()) // add port: interrupt pending of ree when cmode is tee,else interrupt pending of tee.
-}
 class AddrBundle(params: IMSICParams) extends  Bundle {
   val valid = Bool()                      // 表示 addr 是否有效
   val bits  = new Bundle {
@@ -130,9 +125,7 @@ case class IMSICParams(
     vgeinWidth: Int = 6,
     // MC iselect信号的位宽(The width of iselect signal):
     iselectWidth:           Int = 12,
-    EnableImsicAsyncBridge: Boolean = true,
-    HasTEEIMSIC:            Boolean = false,
-    HartIDBits: Int = 9
+    EnableImsicAsyncBridge: Boolean = true
     // MC{hide}
 ) {
   lazy val xlen: Int = 64 // currently only support xlen = 64
@@ -147,10 +140,6 @@ case class IMSICParams(
 
   lazy val eixNum: Int = pow2(imsicIntSrcWidth).toInt / xlen // number of eip/eie registers
   lazy val intFileMemWidth: Int = 12 // interrupt file memory region width: 12-bit width => 4KB size
-  lazy val tee_mshift: Int = HartIDBits + intFileMemWidth // 9: max 512 hart, bit10 is 1, tee imsic accessed.
-  lazy val tee_sshift: Int = HartIDBits + log2Ceil(1+ geilen) + intFileMemWidth // 9: max 512 hart, bit10 is 1, tee imsic accessed.
-  lazy val tee_mAddr: Long = mAddr + (1L << tee_mshift)
-  lazy val tee_sgAddr: Long = sgAddr + (1L << tee_sshift)
   require(vgeinWidth >= log2Ceil(geilen))
   require(
     iselectWidth >= 8,
@@ -463,88 +452,22 @@ class IMSIC(
   toCSR.illegal := toCSR_illegal_d
 }
 
-//define IMSIC_WRAP: instance one imsic when HasCVMExtention is supported, else instance two imsic modules.
-class IMSIC_WRAP(
-    params:    IMSICParams,
-    beatBytes: Int = 4
-)(implicit p: Parameters) extends Module {
-  // define the ports
-  val toCSR   = IO(Output(new IMSICToCSRBundle(params)))
-  val fromCSR = IO(Input(new CSRToIMSICBundle(params)))
-  val msiio = IO(new MSITransBundle(params))
-  // define additional ports when HasCVMExtention is supported.
-  val sec = if (params.HasTEEIMSIC) Some(IO(new ForCVMBundle()))
-  else None // include cmode input port,and o_notice_pending output port.
-  val teemsiio = if (params.HasTEEIMSIC) Some(IO(new MSITransBundle(params))) else None
-  // instance module,and body logic
-  private val imsic = Module(new IMSIC(params, beatBytes))
-  imsic.fromCSR := fromCSR
-  toCSR         := imsic.toCSR
-  imsic.msiio <> msiio
-  // define additional logic for sec extention
-  // .foreach logic only happens when sec is not none.
-  sec.foreach { secIO =>
-    // get the sec.mode, connect sec.o_notice_pending to top.
-    val cmode          = Wire(Bool())
-    val notice_pending = Wire(Bool())
-    cmode                := secIO.cmode
-    secIO.notice_pending := notice_pending
-
-    // instance tee imsic module.
-    val teeimsic = Module(new IMSIC(params, beatBytes))
-    teemsiio.foreach(teemsiio => teeimsic.msiio <> teemsiio)
-    toCSR.rdata   := Mux(cmode, teeimsic.toCSR.rdata, imsic.toCSR.rdata) // toCSR needs to the selected depending cmode.
-    toCSR.illegal := Mux(cmode, teeimsic.toCSR.illegal, imsic.toCSR.illegal)
-    val s_pendings = Mux(cmode, teeimsic.toCSR.pendings(params.intFilesNum-1,1), imsic.toCSR.pendings(params.intFilesNum-1,1))
-    val m_pendings = imsic.toCSR.pendings(0) // machine mode only from imsic.
-    toCSR.pendings := Cat(s_pendings,m_pendings)
-    //  toCSR.pendings := VecInit((0 until params.intFilesNum).map(i => pendings(i))) // uint->vector
-    
-    toCSR.topeis    := Mux(cmode, teeimsic.toCSR.topeis, imsic.toCSR.topeis)
-    toCSR.topeis(0) := imsic.toCSR.topeis(0) // machine mode only from imsic.
-    // to get the o_notice_pending, excluding the machine interrupt
-//    val s_orpend_ree = imsic.toCSR.pendings.slice(1, params.intFilesNum) // extract the | of vector(1,N-1)
-//    val s_orpend_tee = teeimsic.toCSR.pendings.slice(1, params.intFilesNum)
-//    notice_pending := Mux(cmode, s_orpend_ree.reduce(_ | _), s_orpend_tee.reduce(_ | _))
-    val s_orpend_ree = imsic.toCSR.pendings(params.intFilesNum-1,1) // extract the | of vector(1,N-1)
-    val s_orpend_tee = teeimsic.toCSR.pendings(params.intFilesNum-1,1) //bit(params.intFilesNum-1:1)
-    notice_pending   := Mux(cmode, s_orpend_ree.orR, s_orpend_tee.orR)
-    teeimsic.fromCSR := fromCSR
-    teeimsic.fromCSR.addr.valid := cmode & fromCSR.addr.valid // cmode=1,controls tee csr access to interrupt file indirectly
-    teeimsic.fromCSR.wdata.valid := cmode & fromCSR.wdata.valid
-    teeimsic.fromCSR.claims(0)   := false.B // machine interrupts are inactive for tee imsic.
-    for (i <- 1 until params.privNum) {
-      teeimsic.fromCSR.claims(i) := cmode & fromCSR.claims(i)
-    }
-
-    imsic.fromCSR.addr.valid := (cmode === false.B) & fromCSR.addr.valid // cmode=1,controls tee csr access to interrupt file indirectly
-    imsic.fromCSR.wdata.valid := (cmode === false.B) & fromCSR.wdata.valid
-    imsic.fromCSR.claims(0)   := fromCSR.claims(0) // machine interrupts are inactive for tee imsic.
-    for (i <- 1 until params.privNum) {
-      imsic.fromCSR.claims(i) := (cmode === false.B) & fromCSR.claims(i)
-    }
-  }
-}
-
-//generate TLIMSIC top module:including TLRegIMSIC_WRAP and IMSIC_WRAP
+//generate TLIMSIC top module:including TLRegIMSIC_WRAP and IMSIC
 class TLIMSIC(
     params:    IMSICParams,
     beatBytes: Int = 4
 //  asyncQueueParams: AsyncQueueParams
-)(implicit p: Parameters) extends LazyModule with HasIMSICParameters {
-  val axireg      = LazyModule(new TLRegIMSIC_WRAP(IMSICParams(HasTEEIMSIC = GHasTEEIMSIC), beatBytes))
+)(implicit p: Parameters) extends LazyModule {
+  val axireg      = LazyModule(new TLRegIMSIC_WRAP(params, beatBytes))
   lazy val module = new Imp
 
   class Imp extends LazyModuleImp(this) {
     val toCSR         = IO(Output(new IMSICToCSRBundle(params)))
     val fromCSR       = IO(Input(new CSRToIMSICBundle(params)))
-    private val imsic = Module(new IMSIC_WRAP(IMSICParams(HasTEEIMSIC = GHasTEEIMSIC), beatBytes))
+    private val imsic = Module(new IMSIC(params, beatBytes))
     toCSR := imsic.toCSR
     imsic.fromCSR := fromCSR
     axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
-    // define additional ports for cvm extention
-    val io_sec = if (GHasTEEIMSIC) Some(IO(new ForCVMBundle()))
-    else None // include cmode input port,and o_notice_pending output port.
     /* code on when imsic has two clock domains.*/
     // --- define soc_clock for imsic bus logic ***//
     val soc_clock = IO(Input(Clock()))
@@ -553,30 +476,22 @@ class TLIMSIC(
     axireg.module.reset := soc_reset
     imsic.clock         := clock
     imsic.reset         := reset
-    axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
-    // code will be compiled only when io_sec is not None.
-    io_sec.foreach(iosec => imsic.sec.foreach(imsicsec => imsicsec <> iosec))
-    // code will be compiled only when tee_axireg is not None.
-    axireg.module.teemsiio.foreach(tee_msi_trans => imsic.teemsiio.foreach(teemsiio => tee_msi_trans <> teemsiio))
   }
 }
 
 class AXI4IMSIC(
     params:    IMSICParams,
     beatBytes: Int = 4
-)(implicit p: Parameters) extends LazyModule with HasIMSICParameters {
-  val axireg      = LazyModule(new AXIRegIMSIC_WRAP(IMSICParams(HasTEEIMSIC = GHasTEEIMSIC), beatBytes))
+)(implicit p: Parameters) extends LazyModule {
+  val axireg      = LazyModule(new AXIRegIMSIC_WRAP(params, beatBytes))
   lazy val module = new Imp
   class Imp extends LazyModuleImp(this) {
     val toCSR         = IO(Output(new IMSICToCSRBundle(params)))
     val fromCSR       = IO(Input(new CSRToIMSICBundle(params)))
-    private val imsic = Module(new IMSIC_WRAP(IMSICParams(HasTEEIMSIC = GHasTEEIMSIC), beatBytes))
+    private val imsic = Module(new IMSIC(params, beatBytes))
     toCSR := imsic.toCSR
     imsic.fromCSR := fromCSR
     axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
-    // define additional ports for cvm extention
-    val io_sec = if (GHasTEEIMSIC) Some(IO(new ForCVMBundle()))
-    else None // include cmode input port,and o_notice_pending output port.
     /* code on when imsic has two clock domains.*/
     // --- define soc_clock for imsic bus logic ***//
     val soc_clock = IO(Input(Clock()))
@@ -585,31 +500,19 @@ class AXI4IMSIC(
     axireg.module.reset := soc_reset
     imsic.clock         := clock
     imsic.reset         := reset
-    // code will be compiled only when io_sec is not None.
-    io_sec.foreach(iosec => imsic.sec.foreach(imsicsec => imsicsec <> iosec))
-    // code will be compiled only when tee_axireg is not None.
-    axireg.module.teemsiio.foreach(tee_msi_trans => imsic.teemsiio.foreach(teemsiio => tee_msi_trans <> teemsiio))
   }
 }
 
-
-// code below is for SEC IMSIC spec
-//generate TLRegIMSIC_WRAP for IMSIC, when HasCVMExtention is supported, IMSIC is instantiated by two times,else only one
 class TLRegIMSIC_WRAP(
     params:    IMSICParams,
     beatBytes: Int = 4,
     seperateBus: Boolean = false
 )(implicit p: Parameters) extends LazyModule {
-  // def IMSIC access TLXbar
-//  require((params.HasTEEIMSIC && seperateBus) == false,
-//    f"both seperateTLBus and HasTEEIMSIC are true !!")
   require(seperateBus == false,
     f"seperateTLBus is true inside TLRegIMSIC_WRAP !!")
   val axireg = LazyModule(new TLRegIMSIC(params, beatBytes)(Parameters.empty))
-  val tee_axireg =
-    if (params.HasTEEIMSIC) Some(LazyModule(new TLRegIMSIC(params, beatBytes)(Parameters.empty))) else None
   val imsic_xbar1to2 = TLXbar()
-  private val ree_sNode = TLManagerNode(Seq(TLSlavePortParameters.v1(
+  private val sNode = TLManagerNode(Seq(TLSlavePortParameters.v1(
       managers = Seq(TLSlaveParameters.v1(
         address = Seq(
           AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1),
@@ -624,56 +527,28 @@ class TLRegIMSIC_WRAP(
       beatBytes = beatBytes
     )))
 
-  private val tee_sNode =  Option.when(params.HasTEEIMSIC)(TLManagerNode(Seq(TLSlavePortParameters.v1(
-    managers = Seq(TLSlaveParameters.v1(
-      address = Seq(
-        AddressSet(params.tee_mAddr, pow2(params.intFileMemWidth) - 1),
-        AddressSet(params.tee_sgAddr, pow2(params.intFileMemWidth) * pow2(log2Ceil(1 + params.geilen)) - 1)),
-      regionType = RegionType.UNCACHED,
-      executable = false,
-      supportsGet = TransferSizes(1, beatBytes),
-      supportsPutPartial = TransferSizes(1, beatBytes),
-      supportsPutFull = TransferSizes(1, beatBytes),
-      //          fifoId = Some(0)
-    )),
-    beatBytes = beatBytes
-  ))))
-  ree_sNode := imsic_xbar1to2
-  tee_sNode.foreach (_ := imsic_xbar1to2)
-  val ree_mNode = TLClientNode(
+  sNode := imsic_xbar1to2
+  val mNode = TLClientNode(
     Seq(TLMasterPortParameters.v1(
       Seq(TLMasterParameters.v1("s_tl_", IdRange(0, 65536)))
     )))
-  val tee_mNode = Option.when(params.HasTEEIMSIC)(
-    TLClientNode(
-      Seq(TLMasterPortParameters.v1(
-        Seq(TLMasterParameters.v1("s_tl_", IdRange(0, 65536)))
-      ))))
-  axireg.fromMem.head := ree_mNode
-  tee_mNode.foreach(tee_axireg.get.fromMem.head := _)
+  axireg.fromMem.head := mNode
   lazy val module = new TLRegIMSICImp(this)
   class TLRegIMSICImp(outer: LazyModule) extends LazyModuleImp(outer) {
     val msiio = IO(Flipped(new MSITransBundle(params)))
     msiio <> axireg.module.msiio
-    val teemsiio = if (params.HasTEEIMSIC) Some(IO(Flipped(new MSITransBundle(params))))
-      else None // backpressure signal for axi4bus, from imsic working on cpu clock
 
-    // code below will be compiled only when teeio is not none.
-    teemsiio.foreach(teemsiio => tee_axireg.foreach(tee_axireg => teemsiio <> tee_axireg.module.msiio))
-    ree_mNode.out.head._1 <> ree_sNode.in.head._1
-    tee_mNode.foreach(_.out.head._1 <> tee_sNode.get.in.head._1)
+    mNode.out.head._1 <> sNode.in.head._1
   }
 }
 
-//generate AXIRegIMSIC_WRAP for IMSIC, when HasCVMExtention is supported, IMSIC is instantiated by two times,else only one
 class AXIRegIMSIC_WRAP(
     params:    IMSICParams,
     beatBytes: Int = 4,
     seperateBus: Boolean = false
 )(implicit p: Parameters) extends LazyModule {
-  // def IMSIC access AXI4Xbar
   val imsic_xbar1to2 = AXI4Xbar()
-  val ree_sNode = {
+  val sNode = {
     AXI4SlaveNode(Seq(AXI4SlavePortParameters(
       slaves = Seq(AXI4SlaveParameters(
         address = Seq(
@@ -686,52 +561,21 @@ class AXIRegIMSIC_WRAP(
       beatBytes = beatBytes
     )))
   }
- val tee_sNode =  Option.when(params.HasTEEIMSIC) {
-    AXI4SlaveNode(Seq(AXI4SlavePortParameters(
-      slaves = Seq(AXI4SlaveParameters(
-        address = Seq(
-          AddressSet(params.tee_mAddr, pow2(params.intFileMemWidth) - 1),
-          AddressSet(params.tee_sgAddr, pow2(params.intFileMemWidth) * pow2(log2Ceil(1 + params.geilen)) - 1)),
-        supportsWrite = TransferSizes(1, beatBytes),
-        supportsRead = TransferSizes(1, beatBytes),
-        interleavedId = Some(0)
-      )),
-      beatBytes = beatBytes
-    )))
-  }
-  ree_sNode := imsic_xbar1to2
-  tee_sNode.foreach(_ := imsic_xbar1to2)
+  sNode := imsic_xbar1to2
   val axireg = LazyModule(new AXIRegIMSIC(params, beatBytes)(Parameters.empty))
-  //  val tee_axireg = if (params.HasTEEIMSIC) Some(LazyModule(new AXIRegIMSIC(IMSICParams(teemode = true), beatBytes)(Parameters.empty))) else None
-  val tee_axireg =
-    if (params.HasTEEIMSIC) Some(LazyModule(new AXIRegIMSIC(params, beatBytes)(Parameters.empty))) else None
-  val ree_mNode = AXI4MasterNode(Seq(AXI4MasterPortParameters(
+  val mNode = AXI4MasterNode(Seq(AXI4MasterPortParameters(
     Seq(AXI4MasterParameters(
       name = "s_axi_",
       id = IdRange(0, 65536)
     ))
   )))
-  val tee_mNode = Option.when(params.HasTEEIMSIC) {
-    AXI4MasterNode(Seq(AXI4MasterPortParameters(
-      Seq(AXI4MasterParameters(
-        name = "s_axi_",
-        id = IdRange(0, 65536)
-      ))
-    )))
-  }
-  axireg.axi4tolite.head.node := ree_mNode
-  tee_axireg.foreach(_.axi4tolite.head.node := tee_mNode.get)
+  axireg.axi4tolite.head.node := mNode
   lazy val module = new AXIRegIMSICImp(this)
 
   class AXIRegIMSICImp(outer: LazyModule) extends LazyModuleImp(outer) {
     val msiio = IO(Flipped(new MSITransBundle(params))) // backpressure signal for axi4bus, from imsic working on cpu clock
     msiio <> axireg.module.msiio
-    val teemsiio = if (params.HasTEEIMSIC) Some(IO(Flipped(new MSITransBundle(params))))
-    else None // backpressure signal for axi4bus, from imsic working on cpu clock
-    // code below will be compiled only when teeio is not none.
-    teemsiio.foreach(teemsiio => tee_axireg.foreach(tee_axireg => teemsiio <> tee_axireg.module.msiio))
-    ree_mNode.out.head._1 <> ree_sNode.in.head._1
-    tee_mNode.foreach(_.out.head._1 <> tee_sNode.get.in.head._1)
+    mNode.out.head._1 <> sNode.in.head._1
   }
 }
 
