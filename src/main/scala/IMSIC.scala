@@ -498,6 +498,126 @@ class IMSIC(
   toCSR.illegal := toCSR_illegal_d
 }
 
+class IMSICMulti(
+    params:    IMSICParams,
+    beatBytes: Int = 4
+)(implicit p: Parameters) extends Module {
+  private val coreParams = params.copy(supervisorDomains = 1)
+
+  val toCSR   = IO(Output(new IMSICToCSRBundle(params)))
+  val fromCSR = IO(Input(new CSRToIMSICBundle(params)))
+  val msiio   = IO(new MSITransBundle(params))
+
+  private val sdicnValid =
+    fromCSR.sdicn >= 1.U && fromCSR.sdicn <= params.supervisorDomains.U(params.sdicnWidth.W)
+  private val activeDomain =
+    (fromCSR.sdicn - 1.U)(params.domainIndexWidth - 1, 0)
+  private val activeDomainOH = UIntToOH(activeDomain, params.supervisorDomains) &
+    Fill(params.supervisorDomains, sdicnValid)
+
+  private val pv = Cat(fromCSR.addr.bits.priv.asUInt, fromCSR.addr.bits.virt)
+  private val mAccess  = pv === Cat(PrivType.M.asUInt, false.B)
+  private val sAccess  = pv === Cat(PrivType.S.asUInt, false.B)
+  private val vsAccess = pv === Cat(PrivType.S.asUInt, true.B)
+  private val svAccess = sAccess || vsAccess
+
+  private val domainIMSICs = Seq.fill(params.supervisorDomains) {
+    Module(new IMSIC(coreParams, beatBytes))
+  }
+
+  private val extFileIndex = msiio.data(params.MSI_INFO_WIDTH - 1, params.imsicIntSrcWidth)
+  private val extIntId     = msiio.data(params.imsicIntSrcWidth - 1, 0)
+  private val targetDomain = WireDefault(0.U(params.domainIndexWidth.W))
+  private val targetFile   = WireDefault(0.U(coreParams.INTP_FILE_WIDTH.W))
+
+  when(extFileIndex === 0.U) {
+    targetDomain := 0.U
+    targetFile   := 0.U
+  }
+  for (domain <- 0 until params.supervisorDomains) {
+    for (offset <- 0 until params.sgFilesPerDomain) {
+      val externalFile = 1 + domain * params.sgFilesPerDomain + offset
+      val localFile = 1 + offset
+      when(extFileIndex === externalFile.U(params.INTP_FILE_WIDTH.W)) {
+        targetDomain := domain.U
+        targetFile   := localFile.U(coreParams.INTP_FILE_WIDTH.W)
+      }
+    }
+  }
+  private val targetDomainOH = UIntToOH(targetDomain, params.supervisorDomains)
+  private val coreMsiData = Cat(targetFile, extIntId)
+
+  private val csrRouteOH = WireDefault(0.U(params.supervisorDomains.W))
+  when(mAccess) {
+    csrRouteOH := 1.U
+  }.elsewhen(svAccess && sdicnValid) {
+    csrRouteOH := activeDomainOH
+  }
+
+  for ((imsic, domain) <- domainIMSICs.zipWithIndex) {
+    val domainSelected = sdicnValid && activeDomain === domain.U
+    val mRoute = if (domain == 0) mAccess else false.B
+    val svRoute = svAccess && domainSelected
+    val csrRoute = mRoute || svRoute
+
+    val coreFromCSR = WireDefault(0.U.asTypeOf(new CSRToIMSICBundle(coreParams)))
+    coreFromCSR.addr.valid := fromCSR.addr.valid && csrRoute
+    coreFromCSR.addr.bits.addr := fromCSR.addr.bits.addr
+    coreFromCSR.addr.bits.virt := fromCSR.addr.bits.virt
+    coreFromCSR.addr.bits.priv := fromCSR.addr.bits.priv
+    coreFromCSR.vgein := fromCSR.vgein
+    coreFromCSR.sdicn := 1.U
+    coreFromCSR.msdeie := 0.U
+    coreFromCSR.wdata.bits.op := fromCSR.wdata.bits.op
+    coreFromCSR.wdata.bits.data := fromCSR.wdata.bits.data
+    coreFromCSR.wdata.valid := fromCSR.wdata.valid && csrRoute
+    coreFromCSR.claims(0) := (if (domain == 0) fromCSR.claims(0) else false.B)
+    coreFromCSR.claims(1) := domainSelected && fromCSR.claims(1)
+    coreFromCSR.claims(2) := domainSelected && fromCSR.claims(2)
+    imsic.fromCSR := coreFromCSR
+
+    imsic.msiio.vld_req := msiio.vld_req && targetDomainOH(domain)
+    imsic.msiio.data := coreMsiData
+  }
+
+  msiio.vld_ack := Mux1H(targetDomainOH.asBools.zip(domainIMSICs.map(_.msiio.vld_ack)))
+
+  private def muxRouted[T <: Data](values: Seq[T]): T = {
+    Mux(csrRouteOH.orR, Mux1H(csrRouteOH.asBools.zip(values)), 0.U.asTypeOf(chiselTypeOf(values.head)))
+  }
+  private def muxActive[T <: Data](values: Seq[T]): T = {
+    Mux(sdicnValid, Mux1H(activeDomainOH.asBools.zip(values)), 0.U.asTypeOf(chiselTypeOf(values.head)))
+  }
+
+  toCSR.rdata.valid := muxRouted(domainIMSICs.map(_.toCSR.rdata.valid))
+  toCSR.rdata.bits  := muxRouted(domainIMSICs.map(_.toCSR.rdata.bits))
+
+  private val pendingBits = Seq(domainIMSICs.head.toCSR.pendings(0)) ++ domainIMSICs.flatMap { imsic =>
+    (1 until coreParams.intFilesNum).map(i => imsic.toCSR.pendings(i))
+  }
+  toCSR.pendings := Cat(pendingBits.reverse)
+
+  toCSR.topeis(0) := domainIMSICs.head.toCSR.topeis(0)
+  toCSR.topeis(1) := muxActive(domainIMSICs.map(_.toCSR.topeis(1)))
+  toCSR.topeis(2) := muxActive(domainIMSICs.map(_.toCSR.topeis(2)))
+
+  private val msdeipBits = Wire(Vec(params.msdeipWidth, Bool()))
+  msdeipBits.foreach(_ := false.B)
+  for (domain <- 0 until params.supervisorDomains) {
+    msdeipBits(domain + 1) := domainIMSICs(domain).toCSR.pendings(coreParams.intFilesNum - 1, 1).orR
+  }
+  private val msdeipValue = msdeipBits.asUInt
+  toCSR.msdeip := msdeipValue
+  toCSR.lsdeip := (msdeipValue & fromCSR.msdeie).orR
+
+  private val invalidPrivAccess =
+    (fromCSR.addr.valid || fromCSR.wdata.valid) && !mAccess && !svAccess
+  private val invalidSdicnAccess =
+    (fromCSR.addr.valid || fromCSR.wdata.valid) && svAccess && !sdicnValid
+  private val wrapperIllegal = RegNext(invalidPrivAccess || invalidSdicnAccess, false.B)
+  toCSR.illegal := muxRouted(domainIMSICs.map(_.toCSR.illegal)) || wrapperIllegal
+}
+
 //generate TLIMSIC top module:including TLRegIMSIC_WRAP and IMSIC
 class TLIMSIC(
     params:    IMSICParams,
@@ -510,7 +630,7 @@ class TLIMSIC(
   class Imp extends LazyModuleImp(this) {
     val toCSR         = IO(Output(new IMSICToCSRBundle(params)))
     val fromCSR       = IO(Input(new CSRToIMSICBundle(params)))
-    private val imsic = Module(new IMSIC(params, beatBytes))
+    private val imsic = Module(new IMSICMulti(params, beatBytes))
     toCSR := imsic.toCSR
     imsic.fromCSR := fromCSR
     axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
@@ -534,7 +654,7 @@ class AXI4IMSIC(
   class Imp extends LazyModuleImp(this) {
     val toCSR         = IO(Output(new IMSICToCSRBundle(params)))
     val fromCSR       = IO(Input(new CSRToIMSICBundle(params)))
-    private val imsic = Module(new IMSIC(params, beatBytes))
+    private val imsic = Module(new IMSICMulti(params, beatBytes))
     toCSR := imsic.toCSR
     imsic.fromCSR := fromCSR
     axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
