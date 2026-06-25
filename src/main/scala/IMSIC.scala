@@ -96,6 +96,7 @@ class AddrBundle(params: IMSICParams) extends  Bundle {
 class CSRToIMSICBundle(params: IMSICParams) extends Bundle {
   val addr  = new AddrBundle(params)
   val vgein = UInt(params.vgeinWidth.W)
+  val smmttEnable = Bool()
   val sdicn = UInt(params.sdicnWidth.W)
   val msdeie = UInt(params.msdeipWidth.W)
   val wdata = ValidIO(new Bundle {
@@ -508,6 +509,7 @@ class IMSICMulti(
   val fromCSR = IO(Input(new CSRToIMSICBundle(params)))
   val msiio   = IO(new MSITransBundle(params))
 
+  private val smmttEnable = fromCSR.smmttEnable
   private val sdicnValid =
     fromCSR.sdicn >= 1.U && fromCSR.sdicn <= params.supervisorDomains.U(params.sdicnWidth.W)
   private val activeDomain =
@@ -520,6 +522,36 @@ class IMSICMulti(
   private val sAccess  = pv === Cat(PrivType.S.asUInt, false.B)
   private val vsAccess = pv === Cat(PrivType.S.asUInt, true.B)
   private val svAccess = sAccess || vsAccess
+
+  private def asExtFileIndex(value: UInt): UInt =
+    value.pad(params.INTP_FILE_WIDTH)(params.INTP_FILE_WIDTH - 1, 0)
+  private def asCoreVgein(value: UInt): UInt =
+    value.pad(coreParams.vgeinWidth)(coreParams.vgeinWidth - 1, 0)
+  private def decodePooledSgOffset(offset: UInt): (UInt, UInt) = {
+    val domainOH = WireDefault(0.U(params.supervisorDomains.W))
+    val localOffset = WireDefault(0.U(coreParams.INTP_FILE_WIDTH.W))
+    for (domain <- 0 until params.supervisorDomains) {
+      for (offsetInDomain <- 0 until params.sgFilesPerDomain) {
+        val pooledOffset = domain * params.sgFilesPerDomain + offsetInDomain
+        when(offset === pooledOffset.U(params.INTP_FILE_WIDTH.W)) {
+          domainOH := (BigInt(1) << domain).U(params.supervisorDomains.W)
+          localOffset := offsetInDomain.U(coreParams.INTP_FILE_WIDTH.W)
+        }
+      }
+    }
+    (domainOH, localOffset)
+  }
+
+  private val pooledVgeinValid = fromCSR.vgein >= 1.U && fromCSR.vgein < params.sgIntFilesNum.U
+  private val pooledAccessSgOffset = WireDefault(0.U(params.INTP_FILE_WIDTH.W))
+  when(vsAccess) {
+    pooledAccessSgOffset := asExtFileIndex(fromCSR.vgein)
+  }
+  private val (pooledAccessDomainOH, pooledAccessLocalOffset) =
+    decodePooledSgOffset(pooledAccessSgOffset)
+  private val pooledAccessValid = sAccess || (vsAccess && pooledVgeinValid)
+  private val (pooledVsDomainOH, pooledVsLocalOffset) =
+    decodePooledSgOffset(asExtFileIndex(fromCSR.vgein))
 
   private val domainIMSICs = Seq.fill(params.supervisorDomains) {
     Module(new IMSIC(coreParams, beatBytes))
@@ -550,30 +582,45 @@ class IMSICMulti(
   private val csrRouteOH = WireDefault(0.U(params.supervisorDomains.W))
   when(mAccess) {
     csrRouteOH := 1.U
-  }.elsewhen(svAccess && sdicnValid) {
+  }.elsewhen(smmttEnable && svAccess && sdicnValid) {
     csrRouteOH := activeDomainOH
+  }.elsewhen(!smmttEnable && svAccess && pooledAccessValid) {
+    csrRouteOH := pooledAccessDomainOH
   }
 
   for ((imsic, domain) <- domainIMSICs.zipWithIndex) {
     val domainSelected = sdicnValid && activeDomain === domain.U
+    val pooledSelected = !smmttEnable && pooledAccessValid && pooledAccessDomainOH(domain)
+    val pooledLocalIsS = pooledAccessLocalOffset === 0.U
     val mRoute = if (domain == 0) mAccess else false.B
-    val svRoute = svAccess && domainSelected
+    val smmttRoute = smmttEnable && svAccess && domainSelected
+    val pooledRoute = svAccess && pooledSelected
+    val svRoute = smmttRoute || pooledRoute
     val csrRoute = mRoute || svRoute
 
     val coreFromCSR = WireDefault(0.U.asTypeOf(new CSRToIMSICBundle(coreParams)))
     coreFromCSR.addr.valid := fromCSR.addr.valid && csrRoute
     coreFromCSR.addr.bits.addr := fromCSR.addr.bits.addr
-    coreFromCSR.addr.bits.virt := fromCSR.addr.bits.virt
+    coreFromCSR.addr.bits.virt := Mux(pooledRoute, !pooledLocalIsS, fromCSR.addr.bits.virt)
     coreFromCSR.addr.bits.priv := fromCSR.addr.bits.priv
-    coreFromCSR.vgein := fromCSR.vgein
+    coreFromCSR.vgein := Mux(
+      pooledRoute,
+      Mux(pooledLocalIsS, 0.U(coreParams.vgeinWidth.W), asCoreVgein(pooledAccessLocalOffset)),
+      fromCSR.vgein
+    )
+    coreFromCSR.smmttEnable := smmttEnable
     coreFromCSR.sdicn := 1.U
     coreFromCSR.msdeie := 0.U
     coreFromCSR.wdata.bits.op := fromCSR.wdata.bits.op
     coreFromCSR.wdata.bits.data := fromCSR.wdata.bits.data
     coreFromCSR.wdata.valid := fromCSR.wdata.valid && csrRoute
     coreFromCSR.claims(0) := (if (domain == 0) fromCSR.claims(0) else false.B)
-    coreFromCSR.claims(1) := domainSelected && fromCSR.claims(1)
-    coreFromCSR.claims(2) := domainSelected && fromCSR.claims(2)
+    coreFromCSR.claims(1) := (smmttEnable && domainSelected && fromCSR.claims(1)) ||
+      (pooledSelected && pooledLocalIsS && (
+        (sAccess && fromCSR.claims(1)) || (vsAccess && fromCSR.claims(2))
+      ))
+    coreFromCSR.claims(2) := (smmttEnable && domainSelected && fromCSR.claims(2)) ||
+      (pooledSelected && !pooledLocalIsS && vsAccess && fromCSR.claims(2))
     imsic.fromCSR := coreFromCSR
 
     imsic.msiio.vld_req := msiio.vld_req && targetDomainOH(domain)
@@ -588,6 +635,9 @@ class IMSICMulti(
   private def muxActive[T <: Data](values: Seq[T]): T = {
     Mux(sdicnValid, Mux1H(activeDomainOH.asBools.zip(values)), 0.U.asTypeOf(chiselTypeOf(values.head)))
   }
+  private def muxPooledVs[T <: Data](values: Seq[T]): T = {
+    Mux(pooledVgeinValid, Mux1H(pooledVsDomainOH.asBools.zip(values)), 0.U.asTypeOf(chiselTypeOf(values.head)))
+  }
 
   toCSR.rdata.valid := muxRouted(domainIMSICs.map(_.toCSR.rdata.valid))
   toCSR.rdata.bits  := muxRouted(domainIMSICs.map(_.toCSR.rdata.bits))
@@ -598,8 +648,18 @@ class IMSICMulti(
   toCSR.pendings := Cat(pendingBits.reverse)
 
   toCSR.topeis(0) := domainIMSICs.head.toCSR.topeis(0)
-  toCSR.topeis(1) := muxActive(domainIMSICs.map(_.toCSR.topeis(1)))
-  toCSR.topeis(2) := muxActive(domainIMSICs.map(_.toCSR.topeis(2)))
+  toCSR.topeis(1) := Mux(
+    smmttEnable,
+    muxActive(domainIMSICs.map(_.toCSR.topeis(1))),
+    domainIMSICs.head.toCSR.topeis(1)
+  )
+  toCSR.topeis(2) := Mux(
+    smmttEnable,
+    muxActive(domainIMSICs.map(_.toCSR.topeis(2))),
+    muxPooledVs(domainIMSICs.map(imsic =>
+      Mux(pooledVsLocalOffset === 0.U, imsic.toCSR.topeis(1), imsic.toCSR.topeis(2))
+    ))
+  )
 
   private val msdeipBits = Wire(Vec(params.msdeipWidth, Bool()))
   msdeipBits.foreach(_ := false.B)
@@ -607,14 +667,19 @@ class IMSICMulti(
     msdeipBits(domain + 1) := domainIMSICs(domain).toCSR.pendings(coreParams.intFilesNum - 1, 1).orR
   }
   private val msdeipValue = msdeipBits.asUInt
-  toCSR.msdeip := msdeipValue
-  toCSR.lsdeip := (msdeipValue & fromCSR.msdeie).orR
+  toCSR.msdeip := Mux(smmttEnable, msdeipValue, 0.U(params.msdeipWidth.W))
+  toCSR.lsdeip := smmttEnable && (msdeipValue & fromCSR.msdeie).orR
 
   private val invalidPrivAccess =
     (fromCSR.addr.valid || fromCSR.wdata.valid) && !mAccess && !svAccess
   private val invalidSdicnAccess =
-    (fromCSR.addr.valid || fromCSR.wdata.valid) && svAccess && !sdicnValid
-  private val wrapperIllegal = RegNext(invalidPrivAccess || invalidSdicnAccess, false.B)
+    (fromCSR.addr.valid || fromCSR.wdata.valid) && smmttEnable && svAccess && !sdicnValid
+  private val invalidPooledVgeinAccess =
+    (fromCSR.addr.valid || fromCSR.wdata.valid) && !smmttEnable && vsAccess && !pooledVgeinValid
+  private val wrapperIllegal = RegNext(
+    invalidPrivAccess || invalidSdicnAccess || invalidPooledVgeinAccess,
+    false.B
+  )
   toCSR.illegal := muxRouted(domainIMSICs.map(_.toCSR.illegal)) || wrapperIllegal
 }
 

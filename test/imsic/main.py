@@ -190,6 +190,35 @@ async def imsic_1_test(dut):
   await select_m_intfile(dut)
   cocotb.log.info("simple_smmtt_two_domain passed")
 
+  # Interrupt-File Pooling test. With Smmtt disabled, the second physical IMSIC
+  # is folded into the same logical S/VS interrupt-file space.
+  cocotb.log.info("interrupt_file_pooling began")
+  await set_smmtt_enable(dut, 0)
+  await set_sdicn(dut, 0)
+  await select_s_intfile(dut)
+  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(1234%256)
+
+  await select_vs_intfile(dut, imsic_geilen + 1)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(77)
+
+  await v_int_vgein(dut, 139, guestID=3, domain=1)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  await select_vs_intfile(dut, imsic_geilen + 1 + 3)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(139)
+
+  assert int(dut.toCSR1_msdeip.value) == 0
+  await set_msdeie(dut, 0b110)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_lsdeip.value) == 0
+  await set_msdeie(dut, 0)
+  await set_smmtt_enable(dut, 1)
+  await set_sdicn(dut, 1)
+  await select_m_intfile(dut)
+  cocotb.log.info("interrupt_file_pooling passed")
+
   # Illegal iselect test
   cocotb.log.info("illegal:iselect began")
   # await write_csr_op(dut, 0x71, 0xc0, op_csrrs)

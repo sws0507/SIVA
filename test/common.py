@@ -217,12 +217,18 @@ async def set_sdicn(dut, sdicn, imsicID=1):
   await FallingEdge(dut.clock)
   fromCSRx_sdicn.value = sdicn
 
+async def set_smmtt_enable(dut, enable, imsicID=1):
+  fromCSRx_smmttEnable = getattr(dut, f"fromCSR{imsicID}_smmttEnable")
+  await FallingEdge(dut.clock)
+  fromCSRx_smmttEnable.value = enable
+
 async def set_msdeie(dut, msdeie, imsicID=1):
   fromCSRx_msdeie = getattr(dut, f"fromCSR{imsicID}_msdeie")
   await FallingEdge(dut.clock)
   fromCSRx_msdeie.value = msdeie
 
 async def init_imsic(dut, imsicID=1):
+  await set_smmtt_enable(dut, 1, imsicID)
   await set_sdicn(dut, 1, imsicID)
   await set_msdeie(dut, 0, imsicID)
   await select_m_intfile(dut, imsicID)
