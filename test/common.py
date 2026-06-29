@@ -213,12 +213,12 @@ async def select_vs_intfile(dut, vgein, imsicID=1):
   fromCSRx_virt.value = 1
 
 async def set_sdicn(dut, sdicn, imsicID=1):
-  fromCSRx_sdicn = getattr(dut, f"fromCSR{imsicID}_sdicn")
+  fromCSRx_sdicn = getattr(dut, f"fromSmmtt{imsicID}_sdicn")
   await FallingEdge(dut.clock)
   fromCSRx_sdicn.value = sdicn
 
 async def set_msdeie(dut, msdeie, imsicID=1):
-  fromCSRx_msdeie = getattr(dut, f"fromCSR{imsicID}_msdeie")
+  fromCSRx_msdeie = getattr(dut, f"fromSmmtt{imsicID}_msdeie")
   await FallingEdge(dut.clock)
   fromCSRx_msdeie.value = msdeie
 

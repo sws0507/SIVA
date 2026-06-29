@@ -33,7 +33,13 @@ class TLAIA()(implicit p: Parameters) extends LazyModule {
 
   // Here we create 2 imsic groups, each group contains two 2 CPUs
   val imsic_params = IMSICParams(EnableImsicAsyncBridge = false)
-  val aplic_params = APLICParams(groupsNum=2, membersNum=2)
+  val aplic_params = APLICParams(
+    groupsNum = 2,
+    membersNum = 2,
+    geilen = imsic_params.geilen,
+    imsicIntSrcWidth = imsic_params.imsicIntSrcWidth,
+    supervisorDomains = imsic_params.imsicNum
+  )
   val imsics_fromMem_xbar = LazyModule(new TLXbar).node
   imsics_fromMem_xbar := toAIA_xbar
 
@@ -63,8 +69,12 @@ class TLAIA()(implicit p: Parameters) extends LazyModule {
     (0 until 4).map (i => {
       val toCSR = IO(Output(chiselTypeOf(imsics(i).module.toCSR))).suggestName(f"toCSR${i}")
       val fromCSR = IO(Input(chiselTypeOf(imsics(i).module.fromCSR))).suggestName(f"fromCSR${i}")
+      val toSmmtt = IO(Output(chiselTypeOf(imsics(i).module.toSmmtt))).suggestName(f"toSmmtt${i}")
+      val fromSmmtt = IO(Input(chiselTypeOf(imsics(i).module.fromSmmtt))).suggestName(f"fromSmmtt${i}")
       toCSR   <> imsics(i).module.toCSR
       fromCSR <> imsics(i).module.fromCSR
+      toSmmtt <> imsics(i).module.toSmmtt
+      fromSmmtt <> imsics(i).module.fromSmmtt
     })
     val intSrcs = IO(Input(chiselTypeOf(aplic.module.intSrcs)))
     intSrcs <> aplic.module.intSrcs

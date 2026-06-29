@@ -173,13 +173,13 @@ async def imsic_1_test(dut):
   await select_vs_intfile(dut, 2)
   assert int(dut.toCSR1_topeis_2.value) == wrap_topei(137)
 
-  assert int(dut.toCSR1_msdeip.value) & 0b110 == 0b110
+  assert int(dut.toSmmtt1_msdeip.value) & 0b110 == 0b110
   await set_msdeie(dut, 1 << 2)
   await FallingEdge(dut.clock)
-  assert int(dut.toCSR1_lsdeip.value) == 1
+  assert int(dut.toSmmtt1_lsdeip.value) == 1
   await set_msdeie(dut, 0)
   await FallingEdge(dut.clock)
-  assert int(dut.toCSR1_lsdeip.value) == 0
+  assert int(dut.toSmmtt1_lsdeip.value) == 0
 
   await set_sdicn(dut, 0)
   await select_s_intfile(dut)
