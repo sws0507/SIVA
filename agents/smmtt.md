@@ -1,8 +1,9 @@
 # Smmtt / Smsdia Notes for SIVA
 
-本文从 `reference/RISCV-Smmtt.pdf` 提取和 SIVA 当前 simple Smmtt/Smsdia 原型相关的信息。该 PDF 标题为
-`RISC-V Supervisor Domains Access Protection`，版本为 `0.2.0, 2024-11-13: Draft`，作者为
-`RISC-V SmMTT Task Group`。
+本文从本仓库的 `reference/RISCV-Smmtt.pdf` 以及 RISC-V SmMTT GitHub 仓库当前 `chapter7.adoc`
+整理和 SIVA simple Smmtt/Smsdia 原型相关的信息。PDF 标题为 `RISC-V Supervisor Domains Access
+Protection`，版本为 `0.2.0, 2024-11-13: Draft`；GitHub `chapter7.adoc` 更新了 Supervisor Domain
+Interrupt Assignment 的术语和 AIA 扩展细节。
 
 这里的 `Smmtt` 按项目语境理解为 Supervisor Domain Access Protection 这组机制，重点包括
 `Smsdid`、`Smmpt` 和 `Smsdia`。SIVA 当前分支的目标不是实现完整内存保护表，而是先做一个简单的
@@ -102,11 +103,13 @@ MPT 检查适用于 effective privilege mode 非 M 的所有物理内存访问�
 
 `MINVAL.SPA` 是配合 `Svinval` 的细粒度 invalidation，需要和 `SFENCE.W.INVAL`、`SFENCE.INVAL.IR` 组合使用。
 
-## 3. `msdcfg`
+## 3. `msdcfg` / `SDICN`
 
 `msdcfg` 是 32-bit M-mode read/write CSR，用于描述当前 hart 上 supervisor domain 的活动配置。
+当前 GitHub `chapter7.adoc` 将相关概念称为 Supervisor Interrupt Domain Number；SIVA 文档和后续实现
+统一沿用本分支既有字段名 `SDICN`。
 
-位段如下：
+旧 PDF 中 `msdcfg` 位段如下，表中最后一行按本项目命名写作 `SDICN`：
 
 | Bits | 字段 | 使用者 |
 | --- | --- | --- |
@@ -119,7 +122,10 @@ MPT 检查适用于 effective privilege mode 非 M 的所有物理内存访问�
 | `6` | `SSM` | `Smqosid` |
 | `5:0` | `SDICN` | `Smsdia` |
 
-本文最关心的是 `SDICN`。它选择当前 hart 上 active supervisor domain interrupt controller。
+本文最关心的是 `SDICN`。它选择当前 hart 上 active supervisor interrupt domain，用于
+supervisor-level external interrupt 和 guest external interrupt。`SDICN` 是 WLRL 字段，必须能保存
+`0` 到最大已实现 supervisor interrupt domain number 的值；若 hart 只连接一个 supervisor interrupt
+domain，`SDICN` 可以只读为 0。
 
 ## 4. Smsdia: Supervisor Domain Interrupt Assignment
 
@@ -127,7 +133,8 @@ MPT 检查适用于 effective privilege mode 非 M 的所有物理内存访问�
 如果某个 supervisor domain 被分配了设备，设备完成 IO 后产生的 external interrupt 也会走类似路径。为了降低
 开销，`Smsdia` 允许把外部中断控制器直接关联到 supervisor domain。
 
-规范允许每个 supervisor domain 关联一个 interrupt controller。这个 controller 可以是：
+当前 `chapter7.adoc` 把中断控制器扩展描述为多个 supervisor interrupt domain。每个实现的 supervisor
+interrupt domain 编号为 `0..N-1`，可关联到一个 supervisor domain。中断控制器可以是：
 
 - IMSIC；
 - APLIC；
@@ -136,84 +143,118 @@ MPT 检查适用于 effective privilege mode 非 M 的所有物理内存访问�
 
 重要边界：
 
-- S/VS-level external interrupt controller 可以有多个，并由 `msdcfg.SDICN` 选择当前 active controller。
+- S/VS-level supervisor interrupt domain 可以有多个，并由 `msdcfg.SDICN` 选择当前 active domain。
 - M-level external interrupt controller 仍然是单一的，并且始终 active。
 - `Smsdia` 不影响 M-level external interrupt。
 
-### `msdcfg.SDICN`
+### IMSIC extension for supervisor domains
 
-`SDICN` 是 WLRL 字段，必须能保存 `0` 到最大已实现 supervisor domain interrupt controller number 的值。
+IMSIC 被扩展为支持多个 supervisor interrupt domain。一个 IMSIC supervisor interrupt domain 包含：
 
-语义：
+- 一个 supervisor-level interrupt file；
+- 可选的一个或多个 guest interrupt files；
+- 一个 supervisor interrupt domain number，也就是 `SDICN`。
 
-| `SDICN` 状态 | 行为 |
+当所有 hart 在单个 hart group 中时，SDICN `n`、hart `h` 的 supervisor-level interrupt file 地址为：
+
+```text
+Address = B + n * 2^I + h * 2^D
+```
+
+当存在 hart groups 时，group `g`、SDICN `n`、hart `h` 的地址为：
+
+```text
+Address = g * 2^E + B + n * 2^I + h * 2^D
+```
+
+其中 `B/C/D/E/k` 延续 AIA 的 IMSIC memory-region 术语，`I` 是 Smmtt 为 supervisor interrupt
+domains 新增的 domain stride 常量。约束：
+
+- `I >= k + D`，确保一个 SDICN bank 内能覆盖所有 harts；
+- 若最大 SDICN 为 `n_max`，`q = ceil(log2(n_max + 1))`；
+- `B` 必须按 `2^(q + I)` 对齐；
+- 有 hart groups 时，`E >= max(k + C, q + I)`。
+
+`msdcfg.SDICN` 选择 IMSIC supervisor interrupt domain 时：
+
+- 选中 domain 的 S file pending signal 反映到 `mip.SEIP`；
+- `siselect` / `sireg` / `stopei` 访问选中 domain 的 S file；
+- 选中 domain 的 guest file pending signals 反映到 `hgeip`；
+- `hstatus.VGEIN` 在选中 domain 内选择 guest file，`vsiselect` / `vsireg` / `vstopei` 访问该 guest file。
+
+若实现 H extension，硬件需要为每个已实现 SDICN 维护一组内部 `hgeip/hgeie`，CSR `hgeip/hgeie`
+按当前 `msdcfg.SDICN` 访问对应元素。
+
+规范通过 64-bit `msideip/msideie` 直接支持最多 64 个 supervisor interrupt domains。更多 domain 可以由 RDSM 仿真，仿真时
+可以利用 AIA state-enable bits 触发 illegal instruction trap 来模拟 IMSIC 行为。注意：当前 GitHub 文本中
+`SDICN=0` 是一个合法 supervisor interrupt domain number，不再表示 “无 active controller”。
+
+### APLIC extension for supervisor domains
+
+APLIC 本来就支持多个 interrupt domains。为支持 supervisor domains，APLIC 必须支持多个 supervisor-level
+interrupt domains。一个 APLIC supervisor-level interrupt domain 可以：
+
+- 使用 direct delivery mode，直接作为某个 supervisor domain 的 interrupt controller；
+- 使用 MSI delivery mode，在 hart 使用 IMSIC 时把线中断转成 MSI 投递到对应 IMSIC SDICN bank。
+
+为了支持 MSI delivery mode，`smsiaddrcfgh` 扩展了两个字段：
+
+| Bits | 字段 | 含义 |
+| --- | --- | --- |
+| `28:24` | `DXS` | Domain Index Shift，domain index 在 MSI 地址中的 bit shift。 |
+| `22:20` | `LHXS` | Low Hart Index Shift，沿用 AIA 含义。 |
+| `18:16` | `DXW` | Domain Index Width，来自 child index 的 domain index 位数。 |
+| `11:0` | High Base PPN | MSI base 高位页号。 |
+
+令 `CI` 为 `sourcecfg[i]` 中的 Child Index，则：
+
+```text
+n = CI & (2^DXW - 1)
+MSI address =
+  (Base PPN | (g << (HHXS + 12)) | (n << DXS) | (h << LHXS) | Guest Index) << 12
+```
+
+这里的 `n` 是目标 IMSIC supervisor interrupt domain number；`DXS = I - 12`，与 IMSIC 新增的 domain
+stride 常量 `I` 对齐。
+
+`msdcfg.SDICN` 选择 APLIC supervisor interrupt domain 时，该 APLIC domain 的 supervisor-level external
+interrupt pending signal 反映到 `mip.SEIP`。
+
+### `msideip` / `msideiph`
+
+`msideip` 是 64-bit read-only M-mode CSR，CSR number 为 `0xF4F`。RV32 下 `msideiph` 是
+`msideip[63:32]` 的只读别名，CSR number 为 `0xF5F`；RV64 下不存在 `msideiph`。
+
+`msideip[i]` 汇总编号为 `i` 的 supervisor interrupt domain 是否有 external interrupt pending：
+
+| Controller 类型 | `msideip[i]` 含义 |
 | --- | --- |
-| `0` 或不是已实现 controller number | 视为没有可访问的 active S/VS interrupt controller。 |
-| 非零且选择 IMSIC | S/VS-level interrupt pending 和 IMSIC CSR 访问都指向被选中的 IMSIC。 |
-| 非零且选择 APLIC | `mip.SEIP` 反映被选中 APLIC 的 S-level external interrupt pending。 |
+| APLIC | 该 APLIC supervisor interrupt domain 的 S-level external interrupt pending signal。 |
+| IMSIC | 该 IMSIC SDICN bank 的 SEIP 置位，或内部 `hgeip & hgeie` 非零，也就是该 bank 的 SGEIP 会置位。 |
 
-若 `SDICN` 为 `0` 或无效值：
+如果后续实现 `Smgeien/Ssgeien`，`mgeien.A/GIF` 会进一步约束 `msideip` 汇总哪些 guest external
+interrupts；simple 原型可以先不实现 `Smgeien`，但文档和命名应为后续扩展留出空间。
 
-- `mip.SEIP` 为 0。
-- 非 custom 的 `siselect` IMSIC register 编号都表示 inaccessible register。
-- M-mode 或 HS-mode 通过 `sireg` 访问 inaccessible register 时触发 illegal instruction exception。
-- 访问 `stopei` 触发 illegal instruction exception。
-- `hstatus.vgein` 只读为 0。
-- `hgeip` 中的 VS-level external interrupt pending signals 为 0。
+### `msideie` / `msideieh`
 
-若 `SDICN` 选择 IMSIC：
+`msideie` 是 64-bit read-write M-mode CSR，CSR number 为 `0x74F`。RV32 下 `msideieh` 是
+`msideie[63:32]` 的读写别名，CSR number 为 `0x75F`；RV64 下不存在 `msideieh`。
 
-- 被选 IMSIC 的 S-level pending signal 反映到 `mip.SEIP`。
-- `siselect` / `stopei` 访问被选 IMSIC 的 S-level interrupt register file。
-- 被选 IMSIC 的 VS-level pending signals 反映到 `hgeip`。
-- `hstatus.VGEIN` 在被选 IMSIC 中选择 guest interrupt file，`vsiselect` / `vstopei` 访问相应 guest file。
+`msideie` 选择哪些 supervisor interrupt domains 会触发 machine supervisor domain external interrupt
+(`MSDEI`)。它不会影响当前 `msdcfg.SDICN` 选中 domain 输出到 `mip.SEIP` 或 `hgeip` 的 pending signals。
 
-若 `SDICN` 选择 APLIC：
+### `MSDEI`
 
-- 被选 APLIC 的 S-level external interrupt pending signal 反映到 `mip.SEIP`。
+`Smsdia` 引入 machine supervisor domain external interrupt (`MSDEI`)：
 
-规范直接支持最多 63 个 supervisor domain 与 interrupt controller 关联。更多 domain 可以由 RDSM 仿真，仿真时
-可令 `SDICN=0`，并利用 CSR illegal instruction trap 来模拟 IMSIC 行为。
-
-如果实现了 `Smsdia`，复位后 `msdcfg.SDICN` 应为非零，并保存一个已实现 supervisor domain interrupt
-controller number。
-
-### `msdeip` / `msdeiph`
-
-`msdeip` 是 MXLEN-bit read-only CSR。RV32 下 `msdeiph` 是 `msdeip[63:32]` 的只读别名；RV64 下不存在
-`msdeiph`。
-
-`msdeip[i]` 汇总编号为 `i` 的 supervisor domain interrupt controller 是否有 external interrupt pending：
-
-| Controller 类型 | `msdeip[i]` 含义 |
-| --- | --- |
-| APLIC | 该 APLIC 的 S-level external interrupt pending signal。 |
-| IMSIC | 该 IMSIC 的 S-level pending 与所有 VS-level pending 的逻辑或。 |
-
-`msdeip` 的可见性不依赖当前 `msdcfg.SDICN` 是否有效；即使 `SDICN=0` 或无效，其他 domain/controller 的
-pending summary 仍可在 `msdeip` 中被 RDSM 看到。
-
-### `msdeie` / `msdeieh`
-
-`msdeie` 是 MXLEN-bit read-write CSR。RV32 下 `msdeieh` 是 `msdeie[63:32]` 的读写别名；RV64 下不存在
-`msdeieh`。
-
-`msdeie` 选择哪些 supervisor domain external interrupt summary 会触发 local supervisor domain external
-interrupt (`LSDEI`)。它不会影响 `msdcfg.SDICN` 当前选中 controller 输出给 S/VS-level 的 pending signals。
-
-### `LSDEI`
-
-`Smsdia` 引入 local supervisor domain external interrupt (`LSDEI`)：
-
-- 位号为 16，出现在 `mip`、`mie`、`sip`、`sie`。
-- `mip[16]` 和 `sip[16]` 称为 `LSDEIP`。
-- `mie[16]` 和 `sie[16]` 称为 `LSDEIE`。
-- `mideleg[16]` 控制是否委托给 S-mode。
-- 不能委托给 VS-mode，`hideleg[16]` 只读为 0。
-- `mip.LSDEIP = ((msdeip & msdeie) != 0)`。
-- `sip.LSDEIP` 在未委托给 S-mode 时为 0；委托后读出 `mip.LSDEIP`。
-
-规范给出的同 privilege interrupt 默认优先级中，`LSDEI` 位于 `STI` 之后、`SGEI` 之前。
+- 位号为 14，出现在 `mip`、`mie`、`sip`、`sie`。
+- `mip[14]` 和 `sip[14]` 称为 `MSDEIP`。
+- `mie[14]` 和 `sie[14]` 称为 `MSDEIE`。
+- `mideleg[14]` 控制是否委托给 S-mode。
+- 不能委托给 VS-mode，`hideleg[14]` 只读为 0。
+- `mip.MSDEIP = ((msideip & msideie) != 0)`。
+- `sip.MSDEIP` 在 `mideleg[14]=0` 时为 0；委托后是 `mip.MSDEIP` 的 alias。
+- 默认同 privilege 中断优先级中，`MSDEI` 位于 `MTI` 之后、`SEI` 之前。
 
 ## 5. 对 SIVA simple Smmtt/Smsdia 原型的含义
 
@@ -229,32 +270,42 @@ interrupt (`LSDEI`)。它不会影响 `msdcfg.SDICN` 当前选中 controller 输
 supervisor domain 选择：
 
 1. M-level interrupt delivery 保持单一且始终 active。
-2. `msdcfg.SDICN` 只选择 S/VS-level 的 active supervisor domain interrupt-controller bank。
-3. IMSIC 内部可把 S/VS interrupt files 扩展为按 domain bank 分组：
+2. `msdcfg.SDICN` 只选择 S/VS-level 的 active supervisor interrupt domain。
+3. IMSIC 内部把 S/VS interrupt files 扩展为按 SDICN bank 分组：
    - M file 仍只有一个；
-   - 每个 supervisor domain bank 含一个 S file 和若干 VS guest files；
-   - 对一个 2-domain 原型，可令 `SDICN=1` 选择 domain bank 0，`SDICN=2` 选择 domain bank 1，`SDICN=0`
-     表示无直接 controller/仿真路径。
+   - 每个 SDICN bank 含一个 S file 和若干 VS guest files；
+   - 对一个 2-domain 原型，建议 `SDICN=0` 选择 bank 0，`SDICN=1` 选择 bank 1，与 GitHub 当前
+     `0..N-1` 编号一致。
 4. CSR 选择逻辑需要跟随 `SDICN`：
    - `siselect` / `sireg` / `stopei` 访问 active bank 的 S file；
    - `hstatus.VGEIN`、`vsiselect`、`vstopei` 访问 active bank 的 VS guest file；
-   - `SDICN=0` 或无效时，按规范返回 zero 或 illegal。
+   - 如需 RDSM emulation，不要把 `SDICN=0` 当作无效值；应通过 state-enable/访问权限机制制造 illegal trap。
 5. MSI 地址解码需要携带 supervisor domain bank 信息：
    - M-level MSI 地址空间不变；
-   - S/VS-level MSI 地址空间需要能定位到 domain bank + guest file；
-   - 简单实现可以先固定两个 domain bank，并在 SG address region 中增加 bank decode，或给不同 bank 分配不同
-     SG base/stride。
-6. `msdeip` 应做成 pending summary：
+   - S/VS-level MSI 地址空间按 `B + SDICN * 2^I + hart * 2^D + guest * 4KiB` 定位到 bank + guest file；
+   - `RegGen` / address decode 应从 SG region 中解析 `SDICN` bank，而不是只解析当前单一 S/VS file index。
+6. APLIC SG MSI route 需要表达目标 SDICN：
+   - 当前 `sourcecfg` 只有 delegation bit，没有 child index；为 Smmtt 应补上 AIA child index 语义；
+   - MSI delivery mode 下，`sourcecfg[i].ChildIndex` 的低 `DXW` 位形成 `n`；
+   - `Domain.getMSIAddr` 需要把 `(n << DXS)` 放入 SG MSI 地址；
+   - `DXS` 应等于 `I - 12`，并和 IMSIC SG bank stride 保持一致；
+   - 对 2-domain 原型可先固定 `DXW=1`，让 `ChildIndex[0]` 选择 SDICN bank。
+7. `msideip` 应做成 pending summary：
    - 每个 bit 对应一个 supervisor domain interrupt controller/bank；
-   - IMSIC bank 的 summary 是 S file pending 与所有 VS file pending 的 OR；
-   - 即使某个 bank 不是 active bank，也应能被 `msdeip` 观察。
-7. `msdeie` 只用于产生 `LSDEI`：
-   - `LSDEIP = ((msdeip & msdeie) != 0)`；
+   - APLIC bank 的 summary 是该 APLIC supervisor-level pending；
+   - IMSIC bank 的 summary 是 S file pending，或该 bank 内部 `hgeip & hgeie` 非零；
+   - 即使某个 bank 不是 active bank，也应能被 `msideip` 观察。
+8. `msideie` 只用于产生 `MSDEI`：
+   - `MSDEIP = ((msideip & msideie) != 0)`；
    - 不应屏蔽 active bank 正常输出到 `mip.SEIP` / `hgeip` 的 pending。
-8. APLIC 侧应继续保持 M domain 和 SG domain 的 AIA 模型：
+9. APLIC 侧应继续保持 M domain 和 SG domain 的 AIA 模型：
    - M domain 仍投递到 M-level IMSIC file；
-   - SG domain 可以根据 target/配置选择目标 supervisor domain bank；
+   - SG domain 通过 `sourcecfg.ChildIndex` + `smsiaddrcfgh.DXS/DXW` 选择目标 SDICN bank；
    - 不建议为 TEE/security domain 复制 legacy IMSIC path。
+10. `Smgeien/Ssgeien` 可作为后续阶段：
+    - simple 原型可先让 RDSM/M-mode 独占 bank 切换与 guest enables；
+    - 若要让某个 supervisor domain 访问部分 guest files，再实现 `mgeien.A/GIF` 和 per-SDICN `hgeip/hgeie`
+      alias 规则。
 
 ## 6. 建议测试点
 
@@ -262,24 +313,30 @@ supervisor domain 选择：
 
 | 测试 | 期望 |
 | --- | --- |
-| 两个 `SDICN` 有效值切换 | `siselect/stopei/hgeip/vsiselect/vstopei` 访问不同 domain bank。 |
-| `SDICN=0` | `mip.SEIP=0`，`hstatus.vgein=0`，`hgeip=0`，IMSIC CSR 访问按规范 illegal。 |
-| 无效 `SDICN` | 行为同 `SDICN=0`。 |
+| 两个 `SDICN` 有效值切换 | `siselect/sireg/stopei/hgeip/vsiselect/vsireg/vstopei` 访问不同 SDICN bank。 |
+| `SDICN=0` | 作为合法 bank 0 工作，而不是 no-controller。 |
 | MSI 投递隔离 | 写入 domain bank 0 的 MSI 不影响 bank 1 的 S/VS pending，反之亦然。 |
-| `msdeip` summary | inactive bank 有 pending 时，active bank 不变，但 `msdeip` 对应 bit 置位。 |
-| `msdeie` / `LSDEI` | 仅当 `(msdeip & msdeie) != 0` 时置 `LSDEIP`。 |
+| IMSIC 地址 decode | `B + n * 2^I + h * 2^D` 写入只影响 SDICN `n` 的 S file。 |
+| APLIC DXS/DXW route | `sourcecfg.ChildIndex[DXW-1:0]` 选择的 SDICN bank 出现在 SG MSI 地址中。 |
+| `msideip` summary | inactive bank 有 pending 时，active bank 不变，但 `msideip` 对应 bit 置位。 |
+| `msideie` / `MSDEI` | 仅当 `(msideip & msideie) != 0` 时置 `MSDEIP`。 |
+| `mideleg[14]` | 未委托时 `sip.MSDEIP/sie.MSDEIE` 为 0；委托后 alias 到 M-level 对应位。 |
 | M-level delivery | 不受 `SDICN` 切换影响，M file 始终按原 AIA 行为工作。 |
 | APLIC SG routing | 同一 wired interrupt 按目标配置投递到正确 supervisor domain bank。 |
+| RDSM emulation path | 若实现 state-enable gating，禁用访问时 IMSIC indirect CSR trap 给 M-mode，且不依赖 `SDICN=0`。 |
 
 ## 7. 需要先定下来的实现选择
 
 在写 RTL 前最好明确这些选择：
 
-1. 2-domain 原型中 `SDICN` 的编码：建议 `0=none/emulated`，`1=domain0`，`2=domain1`。
-2. SG MSI address space 如何编码 domain bank：新增 bank bit、扩大 stride，还是分配两个 SG base。
-3. `msdcfg` 是否先放在 IMSIC 模块内部，还是由上层 CSR block 管理并输入 IMSIC。
-4. `msdeip/msdeie/LSDEI` 是否在 IMSIC 内部生成，还是上移到 hart-local interrupt/CSR glue。
-5. reset 后 `SDICN` 的默认值：若实现 `Smsdia`，规范要求非零并指向一个已实现 controller；简单原型可默认 `1`。
+1. 2-domain 原型中 `SDICN` 编码：建议 `0=domain0`，`1=domain1`。
+2. IMSIC SG region 的 `I` 取值：至少满足 `I >= k + D`，并让 `B` 按 `2^(q + I)` 对齐。
+3. APLIC `DXS/DXW` 是否先 hardwire：2-domain 原型可 hardwire `DXW=1`、`DXS=I-12`。
+4. `sourcecfg.ChildIndex` 如何补进当前 `Sourcecfg`：当前仅有 `D` 和 `SM`，需要兼容 delegation 语义。
+5. `msdcfg.SDICN` 放在 IMSIC 模块内部，还是由上层 CSR block 管理并输入 IMSIC/APLIC glue。
+6. `msideip/msideie/MSDEI` 在 IMSIC 内部生成，还是上移到 hart-local interrupt/CSR glue。
+7. `hgeip/hgeie` per-SDICN array 放在 IMSIC 内，还是放在 CSR glue 并把 enable 结果输入 IMSIC summary。
+8. simple 原型是否暂不实现 `Smgeien/Ssgeien`；如果暂不实现，需要避免把相关规则误写进 RTL。
 
 ## 8. 与当前代码的最小对应关系
 
@@ -287,8 +344,10 @@ supervisor domain 选择：
 | --- | --- | --- |
 | IMSIC S/VS interrupt controller | `IMSIC.scala` 中的 S file 和 guest files | 扩成按 supervisor domain bank 选择的 S/VS file 集合。 |
 | `msdcfg.SDICN` | 当前未实现 | 新增 active bank 选择状态，只影响 S/VS，不影响 M。 |
-| IMSIC CSR indirection | `fromCSR.addr`、`fromCSR.vgein`、`intFilesSelOH_*` | 在 S/VS 路径加入 `SDICN` bank offset 和 invalid handling。 |
-| MSI receive decode | `RegGen` 输出 `Cat(fileIndex, seteipnum)` | 让 SG MSI decode 产生 banked S/VS file index。 |
-| Pending summary | `toCSR.pendings` | 增加 `msdeip` 所需的 per-bank OR summary。 |
-| APLIC SG MSI route | `APLIC.Domain.getMSIAddr` 和 SG domain target | 让 SG target 能表达目标 supervisor domain bank。 |
-
+| IMSIC CSR indirection | `fromCSR.addr`、`fromCSR.vgein`、`intFilesSelOH_*` | 在 S/VS 路径加入 `SDICN` bank offset；`SDICN=0` 是 bank 0。 |
+| IMSIC file count | `IMSICParams.intFilesNum = 2 + geilen` | 改为 `1 + sdicnNum * (1 + geilen)` 一类布局，M file 仍为 index 0。 |
+| MSI receive decode | `RegGen` 输出 `Cat(fileIndex, seteipnum)` | 让 SG MSI decode 产生 banked S/VS file index，解析 `SDICN` 和 guest file。 |
+| Pending summary | `toCSR.pendings` | 增加 `msideip` 所需的 per-SDICN summary。 |
+| `hgeip/hgeie` | 当前 CSR glue 未建 per-domain array | 每个 SDICN 一组内部状态，CSR 按 `msdcfg.SDICN` 选择。 |
+| APLIC SG MSI route | `APLIC.Domain.getMSIAddr` 和 SG domain target | 加入 `sourcecfg.ChildIndex`、`smsiaddrcfgh.DXS/DXW`，让 target 表达目标 SDICN bank。 |
+| APLIC register model | 当前 hardwire `*msiaddrcfg*` regs，`Sourcecfg` 无 ChildIndex | Smmtt 阶段至少 hardwire/暴露 `DXS/DXW`，并补全 child index 读写。 |
