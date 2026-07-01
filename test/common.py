@@ -99,6 +99,20 @@ async def interrupt(dut, i):
 ################################################################################
 imsic_m_base_addr   = 0x61000000
 imsic_sg_base_addr  = 0x82900000
+imsic_groups_num    = 2
+imsic_members_num   = 2
+imsic_geilen        = 7
+imsic_imsic_num     = 2
+imsic_int_file_size = 0x1000
+imsic_m_stride      = imsic_int_file_size
+imsic_sg_files_per_domain = 1 + imsic_geilen
+imsic_sg_files_per_imsic = imsic_sg_files_per_domain
+imsic_sg_hart_stride = imsic_sg_files_per_domain * imsic_int_file_size
+imsic_sg_domain_stride = imsic_members_num * imsic_sg_hart_stride
+imsic_group_stride  = max(
+  imsic_members_num * imsic_m_stride,
+  imsic_imsic_num * imsic_sg_domain_stride,
+)
 csr_addr_eidelivery = 0x70
 csr_addr_eithreshold = 0x72
 csr_addr_eip0 = 0x80
@@ -110,19 +124,36 @@ op_csrrw = 1
 op_csrrs = 2
 op_csrrc = 3
 
+def imsic_group_member(imsicID):
+  return imsicID // imsic_members_num, imsicID % imsic_members_num
+
+def imsic_m_file_addr(imsicID=1):
+  group, member = imsic_group_member(imsicID)
+  return imsic_m_base_addr + imsic_group_stride * group + imsic_m_stride * member
+
+def imsic_sg_file_addr(imsicID=1, domain=0, guestID=0):
+  group, member = imsic_group_member(imsicID)
+  return (
+    imsic_sg_base_addr
+    + imsic_group_stride * group
+    + imsic_sg_domain_stride * domain
+    + imsic_sg_hart_stride * member
+    + imsic_int_file_size * guestID
+  )
+
 async def m_int(dut, intnum, imsicID=1):
   """Issue an interrupt to the M-mode interrupt file."""
-  await a_put_full32(dut, imsic_m_base_addr+0x1000*imsicID, intnum)
+  await a_put_full32(dut, imsic_m_file_addr(imsicID), intnum)
   await RisingEdge(dut.clock)
 
-async def s_int(dut, intnum, imsicID=1):
+async def s_int(dut, intnum, imsicID=1, domain=0):
   """Issue an interrupt to the S-mode interrupt file."""
-  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID, intnum)
+  await a_put_full32(dut, imsic_sg_file_addr(imsicID, domain, 0), intnum)
   await RisingEdge(dut.clock)
 
-async def v_int_vgein(dut, intnum, imsicID=1, guestID=2):
+async def v_int_vgein(dut, intnum, imsicID=1, guestID=2, domain=0):
   """Issue an interrupt to the VS-mode interrupt file with vgein2."""
-  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*guestID, intnum)
+  await a_put_full32(dut, imsic_sg_file_addr(imsicID, domain, guestID), intnum)
   await RisingEdge(dut.clock)
 
 async def claim(dut, imsicID=1):
@@ -197,20 +228,35 @@ async def select_vs_intfile(dut, vgein, imsicID=1):
   fromCSRx_vgein.value = vgein
   fromCSRx_virt.value = 1
 
+async def set_sdicn(dut, sdicn, imsicID=1):
+  fromSmmttx_sdicn = getattr(dut, f"fromSmmtt{imsicID}_sdicn")
+  await FallingEdge(dut.clock)
+  fromSmmttx_sdicn.value = sdicn
+
+async def set_msdeie(dut, msdeie, imsicID=1):
+  fromSmmttx_msdeie = getattr(dut, f"fromSmmtt{imsicID}_msdeie")
+  await FallingEdge(dut.clock)
+  fromSmmttx_msdeie.value = msdeie
+
 async def init_imsic(dut, imsicID=1):
+  await set_sdicn(dut, 0, imsicID)
+  await set_msdeie(dut, 0, imsicID)
   await select_m_intfile(dut, imsicID)
   await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
   for e in range(0,32):
     await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
-  await select_s_intfile(dut, imsicID)
-  await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
-  for e in range(0,32):
-    await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
-  for i in range(0,64):
-    await select_vs_intfile(dut, i, imsicID)
+  for domain in range(0, imsic_imsic_num):
+    await set_sdicn(dut, domain, imsicID)
+    await select_s_intfile(dut, imsicID)
     await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
     for e in range(0,32):
       await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
+    for i in range(1, imsic_geilen + 1):
+      await select_vs_intfile(dut, i, imsicID)
+      await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
+      for e in range(0,32):
+        await write_csr(dut, csr_addr_eie0 + 2*e, -1, imsicID)
+  await set_sdicn(dut, 0, imsicID)
 
 
 ################################################################################

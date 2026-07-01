@@ -351,3 +351,90 @@ supervisor domain 选择：
 | `hgeip/hgeie` | 当前 CSR glue 未建 per-domain array | 每个 SDICN 一组内部状态，CSR 按 `msdcfg.SDICN` 选择。 |
 | APLIC SG MSI route | `APLIC.Domain.getMSIAddr` 和 SG domain target | 加入 `sourcecfg.ChildIndex`、`smsiaddrcfgh.DXS/DXW`，让 target 表达目标 SDICN bank。 |
 | APLIC register model | 当前 hardwire `*msiaddrcfg*` regs，`Sourcecfg` 无 ChildIndex | Smmtt 阶段至少 hardwire/暴露 `DXS/DXW`，并补全 child index 读写。 |
+
+## 9. 当前 simple Smmtt 原型已经做过的改动
+
+本节记录当前工作区为了实现 simple Smmtt/Smsdia 原型已经落到 RTL/测试里的改动。它是实现状态记录，
+不是完整规范；后续若继续推进，应以这里为起点检查未完成项。
+
+### IMSIC
+
+`src/main/scala/IMSIC.scala` 已经从单个 S/VS interrupt-file bank 扩展为多 bank 原型：
+
+- `IMSICParams` 新增 `imsicNum`，当前默认 2，用来表示每个 hart 内部的物理 IMSIC supervisor-domain banks。
+- 保留单一 M file；S/VS file 按 bank 复制，每个 bank 包含 1 个 S file 和 `geilen` 个 VS guest files。
+- 新增 SG 地址布局参数：`sgFilesPerDomain`、`sgHartStrideWidth`、`sgRegionWidth`、`imsicIndexWidth`、
+  `sdicnWidth`、`msdeipWidth`，并提供 `sgDomainAddr`、`sgDomainIndex`、`sgAddressSets` 供 bus wrapper 使用。
+- MSI 数据宽度扩展为携带 `(imsic bank, local interrupt-file index, interrupt id)`，`RegGen` 为每个 SG bank
+  生成独立的 regmap region，并把地址写入解码为 banked MSI target。
+- 新增 `SmmttToIMSICBundle` 和 `IMSICToSmmttBundle`，当前原型接口包含：
+  - `fromSmmtt.sdicn`：选择 active S/VS bank；
+  - `fromSmmtt.msdeie`：选择哪些 bank summary 产生 local summary interrupt；
+  - `toSmmtt.msdeip`：每个 bank 的 pending summary；
+  - `toSmmtt.lsdeip`：`(msdeip & msdeie).orR` 的本地 summary pending。
+- 新增 `IMSICMulti` wrapper：内部实例化 `imsicNum` 个单 bank `IMSIC`，M-mode CSR/MSI 固定路由到 bank 0，
+  S/VS CSR 和 claim 跟随 `SDICN` 路由到 active bank。
+- `IMSICMulti` 对无效 `SDICN` 的 S/VS CSR 访问置 illegal；`SDICN=0` 是合法 bank 0。
+- `toCSR.pendings`、`toCSR.topeis(1)`、`toCSR.topeis(2)` 输出 active bank 的 S/VS 视图，同时保留 bank 0 的
+  M-level 输出。
+- TL/AXI IMSIC wrapper 改为实例化 `IMSICMulti`，并把 `toSmmtt/fromSmmtt` 端口暴露到上层。
+- TL/AXI IMSIC memory map 从原来的单一 SG region 改为 `params.sgAddressSets`，每个 SG bank 一个 address set。
+
+注意：当前 RTL 原型的 summary CSR/interrupt 命名仍使用 `msdeip/msdeie/lsdeip`。若后续要完全贴近当前
+GitHub `chapter7.adoc`，需要再决定是否统一改名为 `msideip/msideie/MSDEI`；本文件其他章节按规范语义解释。
+
+### APLIC
+
+`src/main/scala/APLIC.scala` 已经让 SG MSI target 可以表达目标 IMSIC bank：
+
+- `APLICParams` 新增 `imsicNum`，并要求 `imsicNum >= 1`。
+- SG 地址参数拆成 `sgHartStrideWidth` 和 `sgDomainStrideWidth`，`groupStrideWidth` 改为同时覆盖 M hart files
+  和全部 Smmtt SG banks。
+- SG base alignment 改为按 `2^(q+I)` 约束，其中 `q` 来自 bank/domain index width。
+- `Domain` 新增 `imsicDomainStrideWidth` 和 `imsicNum` 参数。
+- SG `target.GuestIndex` 由原来的 guest id 扩展为 flat guest index：`domain * (geilen + 1) + localGuest`。
+- `getMSIAddr` 从 flat guest index 拆出 `domainID` 和 `localGuestID`，并把 `domainID << imsicDomainStrideWidth`
+  编入 MSI 地址，从而把 APLIC SG 中断投递到目标 SDICN bank。
+- M domain 仍使用原有 M-level IMSIC 地址模型，不参与 SDICN bank 选择。
+
+### Example / 集成封装
+
+`src/main/scala/Example.scala` 和 `src/main/scala/Example-axi.scala` 已同步 simple Smmtt 参数和地址映射：
+
+- `APLICParams` 从 `IMSICParams` 继承 `geilen`、`imsicIntSrcWidth` 和 `imsicNum`，避免 APLIC/IMSIC 参数不一致。
+- TL/AXI map 根据 `imsic_params.sgDomainIndex(base)` 识别 SG bank，并映射到
+  `sgBaseAddr + domain * 2^sgDomainStrideWidth + member * 2^sgHartStrideWidth`。
+- 每个 IMSIC instance 的 `toSmmtt/fromSmmtt` 端口向顶层导出，测试和后续 CSR glue 可以直接驱动 `SDICN`
+  和读取 pending summary。
+
+### 测试
+
+IMSIC Cocotb 测试已经从一个大 `main.py` 拆成多个 focused test modules：
+
+- `test/imsic/main.py` 变成入口说明，真实测试分散到 `imsic_m_mode.py`、`imsic_csr.py`、
+  `imsic_supervisor.py`、`imsic_smmtt.py`、`imsic_illegal.py`、`imsic_readonly.py`。
+- `test/imsic/imsic_common.py` 新增 IMSIC setup helper，统一 reset、初始化和选择 interrupt file。
+- `test/common.py` 新增 Smmtt-aware IMSIC 地址 helper：`imsic_m_file_addr`、`imsic_sg_file_addr`，
+  以及 `set_sdicn`、`set_msdeie`。
+- `init_imsic` 会遍历所有 simple Smmtt banks 初始化 S/VS interrupt files，最后回到 `SDICN=0`。
+- `imsic_smmtt_bank_selection_test` 覆盖：
+  - `SDICN=0/1` bank 切换；
+  - inactive bank pending 不影响 active bank `topei`；
+  - VS guest file 按 bank 隔离；
+  - `msdeip` per-bank summary；
+  - `msdeie` 控制 `lsdeip`；
+  - 无效 `SDICN=2` 的 S/VS CSR 访问 illegal。
+- `test/aplic/main.py` 新增 SG flat guest index 测试，确认 APLIC 可把 MSI 投递到 domain 1 的 SG bank。
+- `test/Makefile.common` 和 `test/imsic/Makefile` 支持按单个 IMSIC test 生成独立 FST waveform 和 XML result。
+
+### 仍需继续完善
+
+当前实现是 simple prototype，还没有完全覆盖规范层面的所有 Smsdia/Smmtt 细节：
+
+- `msdcfg` 真实 CSR 尚未接入；目前测试通过 `fromSmmtt.sdicn` 直接驱动 active bank。
+- `msdeip/msdeie/lsdeip` 的命名和当前 GitHub `chapter7.adoc` 的 `msideip/msideie/MSDEI` 仍需最终取舍。
+- `hgeip/hgeie` 还不是完整 per-SDICN CSR array；当前 summary 主要来自各 bank S/VS pending。
+- APLIC 还没有完整实现 `smsiaddrcfgh.DXS/DXW` 可编程寄存器，也没有真正补齐 `sourcecfg.ChildIndex` 字段；
+  当前用 flat `GuestIndex` 表达目标 bank。
+- RDSM emulation path、state-enable gating、`Smgeien/Ssgeien`、更多 domain 的软件仿真还未实现。
+- APLIC direct delivery mode 的多 supervisor interrupt domains 尚未扩展；当前重点是 APLIC MSI delivery 到 IMSIC banks。

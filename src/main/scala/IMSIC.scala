@@ -108,6 +108,14 @@ class IMSICToCSRBundle(params: IMSICParams) extends Bundle {
   val pendings = UInt(params.intFilesNum.W)
   val topeis   = Vec(params.privNum, UInt(32.W))
 }
+class SmmttToIMSICBundle(params: IMSICParams) extends Bundle {
+  val sdicn  = UInt(params.sdicnWidth.W)
+  val msdeie = UInt(params.msdeipWidth.W)
+}
+class IMSICToSmmttBundle(params: IMSICParams) extends Bundle {
+  val msdeip = UInt(params.msdeipWidth.W)
+  val lsdeip = Bool()
+}
 case class IMSICParams(
     // MC IMSIC中断源数量的对数，默认值8表示IMSIC支持最多512（2^9）个中断源
 
@@ -125,6 +133,8 @@ case class IMSICParams(
     vgeinWidth: Int = 6,
     // MC iselect信号的位宽(The width of iselect signal):
     iselectWidth:           Int = 12,
+    // Number of physical IMSIC banks inside each hart for simple Smmtt.
+    imsicNum:               Int = 2,
     EnableImsicAsyncBridge: Boolean = true
     // MC{hide}
 ) {
@@ -135,18 +145,35 @@ case class IMSICParams(
     f"imsicIntSrcWidth=${imsicIntSrcWidth}, must not greater than log2(2048)=11, as there are at most 2048 eip/eie bits" +
       "must not be less than log2(64)=6, as there must be at least 64 eip/eie bits"
   )
+  require(imsicNum >= 1 && imsicNum <= 63)
   lazy val privNum:     Int = 3          // number of privilege modes: machine, supervisor, virtualized supervisor
-  lazy val intFilesNum: Int = 2 + geilen // number of interrupt files, m, s, vs0, vs1, ...
+  lazy val intFilesNum: Int = 2 + geilen // number of interrupt files in one IMSIC, m, s, vs0, vs1, ...
+  lazy val sgFilesPerDomain: Int = 1 + geilen
+  lazy val sgFilesPerImsic: Int = sgFilesPerDomain
+  lazy val sgIntFilesNum: Int = imsicNum * sgFilesPerDomain
+  lazy val externalIntFilesNum: Int = 1 + sgIntFilesNum
 
   lazy val eixNum: Int = pow2(imsicIntSrcWidth).toInt / xlen // number of eip/eie registers
   lazy val intFileMemWidth: Int = 12 // interrupt file memory region width: 12-bit width => 4KB size
+  lazy val sgHartStrideWidth: Int = intFileMemWidth + log2Ceil(sgFilesPerDomain)
+  lazy val sgRegionWidth: Int = sgHartStrideWidth + log2Ceil(imsicNum)
+  lazy val imsicIndexWidth: Int = log2Ceil(imsicNum max 2)
+  lazy val sdicnWidth: Int = 6
+  lazy val msdeipWidth: Int = imsicNum
   require(vgeinWidth >= log2Ceil(geilen))
   require(
     iselectWidth >= 8,
     f"iselectWidth=${iselectWidth} needs to be able to cover addr [0x70, 0xFF], that is from CSR eidelivery to CSR eie63"
   )
   lazy val INTP_FILE_WIDTH = log2Ceil(intFilesNum)
-  lazy val MSI_INFO_WIDTH  = imsicIntSrcWidth + INTP_FILE_WIDTH
+  lazy val MSI_INFO_WIDTH  = imsicIntSrcWidth + INTP_FILE_WIDTH + imsicIndexWidth
+
+  def sgDomainAddr(domain: Int): BigInt =
+    BigInt(sgAddr) + (BigInt(domain) << sgHartStrideWidth)
+  def sgDomainIndex(addr: BigInt): Option[Int] =
+    (0 until imsicNum).find(domain => sgDomainAddr(domain) == addr)
+  def sgAddressSets: Seq[AddressSet] =
+    (0 until imsicNum).map(domain => AddressSet(sgDomainAddr(domain), pow2(sgHartStrideWidth) - 1))
 }
 
 class IMSIC(
@@ -185,7 +212,7 @@ class IMSIC(
     msi_valid_o := msi_intf_valids // multi-bis switch vector
     when(msi_vld_ris_cpu) {
       msi_data_catch := msi_in(params.imsicIntSrcWidth - 1, 0)
-      msi_intf_valids := 1.U << msi_in(params.MSI_INFO_WIDTH - 1,params.imsicIntSrcWidth)
+      msi_intf_valids := 1.U << msi_in(params.imsicIntSrcWidth + params.INTP_FILE_WIDTH - 1, params.imsicIntSrcWidth)
     }.otherwise {
       msi_intf_valids := 0.U
     }
@@ -452,6 +479,116 @@ class IMSIC(
   toCSR.illegal := toCSR_illegal_d
 }
 
+class IMSICMulti(
+    params:    IMSICParams,
+    beatBytes: Int = 4
+)(implicit p: Parameters) extends Module {
+  private val coreParams = params.copy(imsicNum = 1)
+
+  val toCSR     = IO(Output(new IMSICToCSRBundle(params)))
+  val fromCSR   = IO(Input(new CSRToIMSICBundle(params)))
+  val toSmmtt   = IO(Output(new IMSICToSmmttBundle(params)))
+  val fromSmmtt = IO(Input(new SmmttToIMSICBundle(params)))
+  val msiio     = IO(new MSITransBundle(params))
+
+  private val sdicnValid =
+    fromSmmtt.sdicn < params.imsicNum.U(params.sdicnWidth.W)
+  private val activeImsic =
+    fromSmmtt.sdicn(params.imsicIndexWidth - 1, 0)
+  private val activeImsicOH = UIntToOH(activeImsic, params.imsicNum) &
+    Fill(params.imsicNum, sdicnValid)
+
+  private val pv = Cat(fromCSR.addr.bits.priv.asUInt, fromCSR.addr.bits.virt)
+  private val mAccess  = pv === Cat(PrivType.M.asUInt, false.B)
+  private val sAccess  = pv === Cat(PrivType.S.asUInt, false.B)
+  private val vsAccess = pv === Cat(PrivType.S.asUInt, true.B)
+  private val svAccess = sAccess || vsAccess
+
+  private val bankIMSICs = Seq.fill(params.imsicNum) {
+    Module(new IMSIC(coreParams, beatBytes))
+  }
+
+  private val extImsicIndex = msiio.data(params.MSI_INFO_WIDTH - 1, params.imsicIntSrcWidth + params.INTP_FILE_WIDTH)
+  private val extFileIndex  = msiio.data(params.imsicIntSrcWidth + params.INTP_FILE_WIDTH - 1, params.imsicIntSrcWidth)
+  private val extIntId      = msiio.data(params.imsicIntSrcWidth - 1, 0)
+  private val targetImsic = Mux(extFileIndex === 0.U, 0.U, extImsicIndex)
+  private val targetImsicValid =
+    targetImsic.pad(params.imsicIndexWidth + 1) < params.imsicNum.U((params.imsicIndexWidth + 1).W)
+  private val targetImsicOH = UIntToOH(targetImsic, params.imsicNum) &
+    Fill(params.imsicNum, targetImsicValid)
+  private val coreMsiData = Cat(0.U(coreParams.imsicIndexWidth.W), extFileIndex, extIntId)
+
+  private val csrRouteOH = WireDefault(0.U(params.imsicNum.W))
+  when(mAccess) {
+    csrRouteOH := 1.U
+  }.elsewhen(svAccess && sdicnValid) {
+    csrRouteOH := activeImsicOH
+  }
+
+  for ((imsic, bank) <- bankIMSICs.zipWithIndex) {
+    val bankSelected = sdicnValid && activeImsic === bank.U
+    val mRoute = if (bank == 0) mAccess else false.B
+    val svRoute = svAccess && bankSelected
+    val csrRoute = mRoute || svRoute
+
+    val coreFromCSR = WireDefault(0.U.asTypeOf(new CSRToIMSICBundle(coreParams)))
+    coreFromCSR.addr.valid := fromCSR.addr.valid && csrRoute
+    coreFromCSR.addr.bits.addr := fromCSR.addr.bits.addr
+    coreFromCSR.addr.bits.virt := fromCSR.addr.bits.virt
+    coreFromCSR.addr.bits.priv := fromCSR.addr.bits.priv
+    coreFromCSR.vgein := fromCSR.vgein
+    coreFromCSR.wdata.bits.op := fromCSR.wdata.bits.op
+    coreFromCSR.wdata.bits.data := fromCSR.wdata.bits.data
+    coreFromCSR.wdata.valid := fromCSR.wdata.valid && csrRoute
+    coreFromCSR.claims(0) := (if (bank == 0) fromCSR.claims(0) else false.B)
+    coreFromCSR.claims(1) := bankSelected && fromCSR.claims(1)
+    coreFromCSR.claims(2) := bankSelected && fromCSR.claims(2)
+    imsic.fromCSR := coreFromCSR
+
+    imsic.msiio.vld_req := msiio.vld_req && targetImsicOH(bank)
+    imsic.msiio.data := coreMsiData
+  }
+
+  msiio.vld_ack := Mux(
+    targetImsicOH.orR,
+    Mux1H(targetImsicOH.asBools.zip(bankIMSICs.map(_.msiio.vld_ack))),
+    false.B
+  )
+
+  private def muxRouted[T <: Data](values: Seq[T]): T = {
+    Mux(csrRouteOH.orR, Mux1H(csrRouteOH.asBools.zip(values)), 0.U.asTypeOf(chiselTypeOf(values.head)))
+  }
+  private def muxActive[T <: Data](values: Seq[T]): T = {
+    Mux(sdicnValid, Mux1H(activeImsicOH.asBools.zip(values)), 0.U.asTypeOf(chiselTypeOf(values.head)))
+  }
+
+  toCSR.rdata.valid := muxRouted(bankIMSICs.map(_.toCSR.rdata.valid))
+  toCSR.rdata.bits  := muxRouted(bankIMSICs.map(_.toCSR.rdata.bits))
+
+  private val activePendings = muxActive(bankIMSICs.map(_.toCSR.pendings))
+  toCSR.pendings := Cat(activePendings(params.intFilesNum - 1, 1), bankIMSICs.head.toCSR.pendings(0))
+
+  toCSR.topeis(0) := bankIMSICs.head.toCSR.topeis(0)
+  toCSR.topeis(1) := muxActive(bankIMSICs.map(_.toCSR.topeis(1)))
+  toCSR.topeis(2) := muxActive(bankIMSICs.map(_.toCSR.topeis(2)))
+
+  private val msdeipBits = Wire(Vec(params.msdeipWidth, Bool()))
+  msdeipBits.foreach(_ := false.B)
+  for (bank <- 0 until params.imsicNum) {
+    msdeipBits(bank) := bankIMSICs(bank).toCSR.pendings(coreParams.intFilesNum - 1, 1).orR
+  }
+  private val msdeipValue = msdeipBits.asUInt
+  toSmmtt.msdeip := msdeipValue
+  toSmmtt.lsdeip := (msdeipValue & fromSmmtt.msdeie).orR
+
+  private val invalidPrivAccess =
+    (fromCSR.addr.valid || fromCSR.wdata.valid) && !mAccess && !svAccess
+  private val invalidSdicnAccess =
+    (fromCSR.addr.valid || fromCSR.wdata.valid) && svAccess && !sdicnValid
+  private val wrapperIllegal = RegNext(invalidPrivAccess || invalidSdicnAccess, false.B)
+  toCSR.illegal := muxRouted(bankIMSICs.map(_.toCSR.illegal)) || wrapperIllegal
+}
+
 //generate TLIMSIC top module:including TLRegIMSIC_WRAP and IMSIC
 class TLIMSIC(
     params:    IMSICParams,
@@ -464,9 +601,13 @@ class TLIMSIC(
   class Imp extends LazyModuleImp(this) {
     val toCSR         = IO(Output(new IMSICToCSRBundle(params)))
     val fromCSR       = IO(Input(new CSRToIMSICBundle(params)))
-    private val imsic = Module(new IMSIC(params, beatBytes))
+    val toSmmtt       = IO(Output(new IMSICToSmmttBundle(params)))
+    val fromSmmtt     = IO(Input(new SmmttToIMSICBundle(params)))
+    private val imsic = Module(new IMSICMulti(params, beatBytes))
     toCSR := imsic.toCSR
     imsic.fromCSR := fromCSR
+    toSmmtt := imsic.toSmmtt
+    imsic.fromSmmtt := fromSmmtt
     axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
     /* code on when imsic has two clock domains.*/
     // --- define soc_clock for imsic bus logic ***//
@@ -488,9 +629,13 @@ class AXI4IMSIC(
   class Imp extends LazyModuleImp(this) {
     val toCSR         = IO(Output(new IMSICToCSRBundle(params)))
     val fromCSR       = IO(Input(new CSRToIMSICBundle(params)))
-    private val imsic = Module(new IMSIC(params, beatBytes))
+    val toSmmtt       = IO(Output(new IMSICToSmmttBundle(params)))
+    val fromSmmtt     = IO(Input(new SmmttToIMSICBundle(params)))
+    private val imsic = Module(new IMSICMulti(params, beatBytes))
     toCSR := imsic.toCSR
     imsic.fromCSR := fromCSR
+    toSmmtt := imsic.toSmmtt
+    imsic.fromSmmtt := fromSmmtt
     axireg.module.msiio <> imsic.msiio // msi_req/msi_ack interconnect
     /* code on when imsic has two clock domains.*/
     // --- define soc_clock for imsic bus logic ***//
@@ -515,8 +660,8 @@ class TLRegIMSIC_WRAP(
   private val sNode = TLManagerNode(Seq(TLSlavePortParameters.v1(
       managers = Seq(TLSlaveParameters.v1(
         address = Seq(
-          AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1),
-          AddressSet(params.sgAddr, pow2(params.intFileMemWidth) * pow2(log2Ceil(1 + params.geilen)) - 1)),
+          AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1)
+        ) ++ params.sgAddressSets,
         regionType = RegionType.UNCACHED,
         executable = false,
         supportsGet = TransferSizes(1, beatBytes),
@@ -552,8 +697,8 @@ class AXIRegIMSIC_WRAP(
     AXI4SlaveNode(Seq(AXI4SlavePortParameters(
       slaves = Seq(AXI4SlaveParameters(
         address = Seq(
-        AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1),
-        AddressSet(params.sgAddr, pow2(params.intFileMemWidth) * pow2(log2Ceil(1 + params.geilen)) - 1)),
+          AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1)
+        ) ++ params.sgAddressSets,
         supportsWrite = TransferSizes(1, beatBytes),
         supportsRead = TransferSizes(1, beatBytes),
         interleavedId = Some(0)
@@ -586,10 +731,9 @@ class TLRegIMSIC(
 )(implicit p: Parameters) extends LazyModule {
   val fromMem = Seq.fill(if (seperateBus) 2 else 1)(TLXbar())
   // val fromMem = LazyModule(new TLXbar).node
-  private val intfileFromMems = Seq(
-    AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1),
-    AddressSet(params.sgAddr, pow2(params.intFileMemWidth) * pow2(log2Ceil(1 + params.geilen)) - 1)
-  ).zipWithIndex.map { case (addrset, i) =>
+  private val intfileFromMems = (Seq(
+    AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1)
+  ) ++ params.sgAddressSets).zipWithIndex.map { case (addrset, i) =>
     val intfileFromMem = TLRegMapperNode(
       address = Seq(addrset),
       beatBytes = beatBytes
@@ -666,10 +810,9 @@ class AXIRegIMSIC(
   val fromMem = Seq.fill(if (seperateBus) 2 else 1)(AXI4Xbar())
   val axi4tolite = Seq.fill(if (seperateBus) 2 else 1)(LazyModule(new AXI4ToLite()(Parameters.empty)))
   fromMem zip axi4tolite.map(_.node) foreach (x => x._1 := x._2)
-  private val intfileFromMems = Seq(
-    AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1),
-    AddressSet(params.sgAddr, pow2(params.intFileMemWidth) * pow2(log2Ceil(1 + params.geilen)) - 1)
-  ).zipWithIndex.map { case (addrset, i) =>
+  private val intfileFromMems = (Seq(
+    AddressSet(params.mAddr, pow2(params.intFileMemWidth) - 1)
+  ) ++ params.sgAddressSets).zipWithIndex.map { case (addrset, i) =>
     val intfileFromMem = AXI4RegMapperNode(
       address = addrset,
       beatBytes = beatBytes
@@ -754,10 +897,8 @@ class RegGen(
     params:    IMSICParams,
     beatBytes: Int = 4
 ) extends Module {
-  val regmapIOs = Seq(
-    params.intFileMemWidth,
-    params.intFileMemWidth + log2Ceil(1 + params.geilen)
-  ).map { width =>
+  val regmapIOs = (Seq(params.intFileMemWidth) ++
+    Seq.fill(params.imsicNum)(params.sgHartStrideWidth)).map { width =>
     val regmapParams = RegMapperParams(width - log2Up(beatBytes), beatBytes)
     (IO(Flipped(Decoupled(new RegMapperInput(regmapParams)))), IO(Decoupled(new RegMapperOutput(regmapParams))))
   }
@@ -766,17 +907,17 @@ class RegGen(
     val seteipnum = UInt(params.MSI_INFO_WIDTH.W)
     val valid     = Bool()
   }))
-  val valids       = WireInit(VecInit(Seq.fill(params.intFilesNum)(false.B)))
-  val seteipnums   = WireInit(VecInit(Seq.fill(params.intFilesNum)(0.U(params.imsicIntSrcWidth.W))))
+  val valids       = WireInit(VecInit(Seq.fill(params.externalIntFilesNum)(false.B)))
+  val seteipnums   = WireInit(VecInit(Seq.fill(params.externalIntFilesNum)(0.U(params.imsicIntSrcWidth.W))))
   val outseteipnum = RegInit(0.U(params.MSI_INFO_WIDTH.W))
-  val outvalids    = RegInit(VecInit(Seq.fill(params.intFilesNum)(false.B)))
+  val outvalids    = RegInit(VecInit(Seq.fill(params.externalIntFilesNum)(false.B)))
 
-  (regmapIOs zip Seq(1, 1 + params.geilen)).zipWithIndex.map { // seq[0]: m interrupt file, seq[1]: s&vs interrupt file
-    case ((regmapIO: (DecoupledIO[RegMapperInput], DecoupledIO[RegMapperOutput]), intFilesNum: Int), i: Int) =>
+  regmapIOs.zipWithIndex.map {
+    case (regmapIO: (DecoupledIO[RegMapperInput], DecoupledIO[RegMapperOutput]), region: Int) =>
       {
-        // j: index is 0 for m file for seq[0],index is 0~params.geilen for S intFile for seq[1]: S, G1, G2, ...
+        val intFilesNum = if (region == 0) 1 else params.sgFilesPerDomain
         val maps = (0 until intFilesNum).map { j =>
-          val flati = i + j // seq[0]:0+0=0;seq[1]:(0~geilen)+1
+          val flati = if (region == 0) 0 else 1 + (region - 1) * params.sgFilesPerDomain + j
           val seteipnum = WireInit(0.U.asTypeOf(Valid(UInt(params.imsicIntSrcWidth.W))));
           dontTouch(seteipnum)
           valids(flati)     := seteipnum.valid
@@ -791,13 +932,20 @@ class RegGen(
         }
         regmapIO._2 <> RegMapper(beatBytes, 1, true, regmapIO._1, maps: _*)
       }
-      for (i <- 0 until params.intFilesNum) {
-        when(valids(i)) {
-          outseteipnum := Cat(i.U, seteipnums(i))
-        }
-      }
-      outvalids    := valids
-      io.seteipnum := outseteipnum
-      io.valid     := outvalids.reduce(_ | _)
   }
+
+  for (i <- 0 until params.externalIntFilesNum) {
+    val imsicIndex = if (i == 0) 0 else (i - 1) / params.sgFilesPerDomain
+    val localFileIndex = if (i == 0) 0 else 1 + (i - 1) % params.sgFilesPerDomain
+    when(valids(i)) {
+      outseteipnum := Cat(
+        imsicIndex.U(params.imsicIndexWidth.W),
+        localFileIndex.U(params.INTP_FILE_WIDTH.W),
+        seteipnums(i)
+      )
+    }
+  }
+  outvalids    := valids
+  io.seteipnum := outseteipnum
+  io.valid     := outvalids.reduce(_ | _)
 }

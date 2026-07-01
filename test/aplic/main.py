@@ -257,4 +257,20 @@ async def aplic_msi_test(dut):
   dut.intSrcs_43.value = 1
   await FallingEdge(dut.clock)
   dut.intSrcs_43.value = 0
-  await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id)
+  await expect_int_num(dut, eiid, imsic_sg_file_addr(0, 0, guest_id))
+
+  # Smmtt SG target uses a flat guest index: bank * (geilen + 1) + local guest.
+  int_num = 44
+  eiid = 0xAD
+  domain = 1
+  guest_id = 0
+  flat_guest_id = domain * imsic_sg_files_per_imsic + guest_id
+  await a_put_full32(dut, aplic_m_base_addr+offset_sourcecfg+(int_num-1)*4, 1<<10)
+  await a_put_full32(dut, aplic_sg_base_addr+offset_sourcecfg+(int_num-1)*4, sourcecfg_sm_edge1)
+  await a_put_full32(dut, aplic_sg_base_addr+offset_targets+(int_num-1)*4, (flat_guest_id<<12)|eiid)
+  await a_put_full32(dut, aplic_sg_base_addr+offset_seties+1*4, 1<<(int_num-32))
+  await FallingEdge(dut.clock)
+  dut.intSrcs_44.value = 1
+  await FallingEdge(dut.clock)
+  dut.intSrcs_44.value = 0
+  await expect_int_num(dut, eiid, imsic_sg_file_addr(0, domain, guest_id))

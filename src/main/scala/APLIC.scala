@@ -56,10 +56,13 @@ case class APLICParams(
   groupsNum       : Int  = 1           ,
   //MC 👉 客户中断文件的数量（Number of guest interrupt files）:
   geilen          : Int  = 7           ,
+  // Number of physical IMSIC banks inside each hart for simple Smmtt.
+  imsicNum        : Int  = 2           ,
   //MC{hide}
   //MC{hide}
 ) {
   require(aplicIntSrcWidth <= 10, f"aplicIntSrcWidth=${aplicIntSrcWidth}, must not greater than log2(1024)=10, as there are at most 1023 sourcecfgs")
+  require(imsicNum >= 1)
   lazy val intSrcNum: Int = pow2(aplicIntSrcWidth).toInt
   lazy val ixNum: Int = pow2(aplicIntSrcWidth).toInt / 32
   lazy val domainMemWidth : Int  = 14 // interrupt file memory region width: 14-bit width => 16KB size
@@ -67,14 +70,17 @@ case class APLICParams(
   lazy val intFileMemWidth : Int  = 12        // interrupt file memory region width: 12-bit width => 4KB size
   // require(mStrideWidth >= intFileMemWidth)
   lazy val mStrideWidth    : Int  = intFileMemWidth // C: stride between each machine-level interrupt files
-  // require(sgStrideWidth >= log2Ceil(geilen+1) + intFileMemWidth)
-  lazy val sgStrideWidth   : Int = log2Ceil(geilen+1) + intFileMemWidth // D: stride between each supervisor- and guest-level interrupt files
-  // require(groupStrideWidth >= k + math.max(mStrideWidth, sgStrideWidth))
+  lazy val sgFilesPerDomain: Int = geilen + 1
+  lazy val sgHartStrideWidth: Int = log2Ceil(sgFilesPerDomain) + intFileMemWidth // D
+  lazy val domainIndexWidth : Int = log2Ceil(imsicNum)
+  lazy val sgDomainStrideWidth: Int = membersWidth + sgHartStrideWidth // I
+  // E must cover M hart files and all Smmtt supervisor-domain banks.
   lazy val membersWidth    : Int = log2Ceil(membersNum) // k
   require((mBaseAddr & (pow2(membersWidth + mStrideWidth) -1)) == 0, "mBaseAddr should be aligned to a 2^(k+C)")
-  lazy val groupStrideWidth: Int = membersWidth + math.max(mStrideWidth, sgStrideWidth) // E: stride between each interrupt file groups
+  lazy val groupStrideWidth: Int =
+    math.max(membersWidth + mStrideWidth, domainIndexWidth + sgDomainStrideWidth) // E
   lazy val groupsWidth     : Int = log2Ceil(groupsNum) // j
-  require((sgBaseAddr & (pow2(membersWidth + sgStrideWidth) - 1)) == 0, "sgBaseAddr should be aligned to a 2^(k+D)")
+  require((sgBaseAddr & (pow2(domainIndexWidth + sgDomainStrideWidth) - 1)) == 0, "sgBaseAddr should be aligned to a 2^(q+I)")
   require(( ((pow2(groupsWidth)-1) * pow2(groupStrideWidth)) & mBaseAddr ) == 0)
   require(( ((pow2(groupsWidth)-1) * pow2(groupStrideWidth)) & sgBaseAddr) == 0)
 
@@ -98,7 +104,8 @@ class APLIC(
   println(f"APLICParams.mBaseAddr:       0x${params.mBaseAddr       }%x")
   println(f"APLICParams.mStrideWidth:      ${params.mStrideWidth    }%d")
   println(f"APLICParams.sgBaseAddr:      0x${params.sgBaseAddr      }%x")
-  println(f"APLICParams.sgStrideWidth:     ${params.sgStrideWidth   }%d")
+  println(f"APLICParams.sgHartStrideWidth: ${params.sgHartStrideWidth}%d")
+  println(f"APLICParams.sgDomainStrideWidth:${params.sgDomainStrideWidth}%d")
   println(f"APLICParams.geilen:            ${params.geilen          }%d")
   println(f"APLICParams.groupsNum:         ${params.groupsNum       }%d")
   println(f"APLICParams.groupStrideWidth:  ${params.groupStrideWidth}%d")
@@ -106,8 +113,10 @@ class APLIC(
   class Domain(
     baseAddr: Long, // base address for this aplic domain
     imsicBaseAddr: Long, // base address for imsic's interrupt files
-    imsicMemberStrideWidth: Int, // C, D: stride between each interrupt files
+    imsicMemberStrideWidth: Int, // C or D: stride between each hart's interrupt files
+    imsicDomainStrideWidth: Int,
     imsicGeilen: Int, // number of guest interrupt files, it is 0 for machine-level domain
+    imsicNum: Int = 1,
   )(implicit p: Parameters) extends Module {
     override val desiredName = "Domain"
     class MSIBundle extends Bundle {
@@ -185,7 +194,7 @@ class APLIC(
     private val targets = new Bundle {
       class Target extends Bundle {
         val HartIndex  = UInt(params.groupsWidth.W + params.membersWidth.W)
-        val GuestIndex = UInt(if (imsicGeilen==0) 0.W else log2Ceil(imsicGeilen).W)
+        val GuestIndex = UInt(if (imsicGeilen==0) 0.W else log2Ceil(imsicNum * (imsicGeilen + 1)).W)
         val EIID       = UInt(params.imsicIntSrcWidth.W)
       }
       val regs = RegInit(VecInit.fill(params.intSrcNum){0.U.asTypeOf(new Target)})
@@ -281,12 +290,18 @@ class APLIC(
           else HartIndex(params.groupsWidth+params.membersWidth-1, params.membersWidth)
         val memberID = if (params.membersWidth == 0) 0.U
           else HartIndex(params.membersWidth-1, 0)
+        val guestIndexWidth = log2Ceil(imsicGeilen + 1)
+        val domainID = if (imsicGeilen == 0) 0.U
+          else guestID >> guestIndexWidth
+        val localGuestID = if (imsicGeilen == 0) 0.U
+          else guestID(guestIndexWidth - 1, 0)
         // It is recommended to hardwire *msiaddrcfg* by the manual:
         // "For any given system, these addresses are fixed and should be hardwired into the APLIC if possible."
         imsicBaseAddr.U |
           (groupID<<params.groupStrideWidth) |
+          (domainID<<imsicDomainStrideWidth) |
           (memberID<<imsicMemberStrideWidth) |
-          (guestID<<params.intFileMemWidth)
+          (localGuestID<<params.intFileMemWidth)
       }
       val genmsiBits = MSIBundle(getMSIAddr(genmsi.HartIndex, 0.U), genmsi.EIID)
       val target = targets.regs(topi)
@@ -314,11 +329,15 @@ class APLIC(
     params.mBaseAddr,
     params.mStrideWidth,
     0,
+    0,
+    1,
   )), Module(new Domain(
     params.baseAddr + pow2(params.domainMemWidth),
     params.sgBaseAddr,
-    params.sgStrideWidth,
+    params.sgHartStrideWidth,
+    params.sgDomainStrideWidth,
     params.geilen,
+    params.imsicNum,
   )))
   val ios = domains.map(d => { val io = IO(d.io.cloneType); io <> d.io; io })
 
