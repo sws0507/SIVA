@@ -81,18 +81,18 @@ async def interrupt(dut, i):
   if EnableImsicAsyncBridge ==1 :
     for _ in range(15):
       await FallingEdge(dut.clock)
-      if int(dut.toCSR0_topeis_0_0.value) == wrap_topei(i):
+      if int(dut.toCSR0_topeis_0.value) == wrap_topei(i):
         break
     else:
-      assert False, f"Timeout waiting for toCSR0_topeis_0_0 == wrap_topei({i})"
+      assert False, f"Timeout waiting for toCSR0_topeis_0 == wrap_topei({i})"
   else :
     for _ in range(10):
       await FallingEdge(dut.clock)
       await FallingEdge(dut.clock)
-      if int(dut.toCSR0_topeis_0_0.value) == wrap_topei(i):
+      if int(dut.toCSR0_topeis_0.value) == wrap_topei(i):
         break
     else:
-      assert False, f"Timeout waiting for toCSR0_topeis_0_0 == wrap_topei({i})"
+      assert False, f"Timeout waiting for toCSR0_topeis_0 == wrap_topei({i})"
 
 ################################################################################
 # IMSIC
@@ -105,7 +105,7 @@ csr_addr_eip0 = 0x80
 csr_addr_eip2 = 0x82
 csr_addr_eie0 = 0xC0
 csr_addr_vs_domain_bitmap = 0x78
-imsic_dynamic_tag_offset = 0x80
+imsic_dynamic_tag_offset = 0x800
 # CSR operation codes
 op_illegal = 0
 op_csrrw = 1

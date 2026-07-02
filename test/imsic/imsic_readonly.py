@@ -13,9 +13,19 @@
 # See the Mulan PSL v2 for more details.
 ########################################################################################
 
-"""IMSIC tests are split across focused modules.
+import cocotb
+from common import *
+from imsic_common import setup_imsic
 
-Run `make run-imsic` from the repository root to execute each focused test in a
-separate simulator invocation and emit per-test FST files under
-`test/imsic/waves/`.
-"""
+
+@cocotb.test()
+async def imsic_eip0_readonly_zero_test(dut):
+  await setup_imsic(dut)
+
+  await write_csr(dut, csr_addr_eip0, 0x1)
+  rdata = await read_csr(dut, csr_addr_eip0)
+  assert rdata == 0
+
+  await m_int(dut, 0)
+  rdata = await read_csr(dut, csr_addr_eip0)
+  assert rdata == 0

@@ -74,7 +74,7 @@ case class APLICParams(
   require((mBaseAddr & (pow2(membersWidth + mStrideWidth) -1)) == 0, "mBaseAddr should be aligned to a 2^(k+C)")
   lazy val groupStrideWidth: Int = membersWidth + math.max(mStrideWidth, sgStrideWidth) // E: stride between each interrupt file groups
   lazy val groupsWidth     : Int = log2Ceil(groupsNum) // j
-  lazy val dynamicTagOffset : Int = 0x80
+  lazy val dynamicTagOffset : Int = 0x800
   require((sgBaseAddr & (pow2(membersWidth + sgStrideWidth) - 1)) == 0, "sgBaseAddr should be aligned to a 2^(k+D)")
   require(( ((pow2(groupsWidth)-1) * pow2(groupStrideWidth)) & mBaseAddr ) == 0)
   require(( ((pow2(groupsWidth)-1) * pow2(groupStrideWidth)) & sgBaseAddr) == 0)

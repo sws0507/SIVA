@@ -105,8 +105,9 @@ class CSRToIMSICBundle(params: IMSICParams) extends Bundle {
 class IMSICToCSRBundle(params: IMSICParams) extends Bundle {
   val rdata    = ValidIO(UInt(params.xlen.W))
   val illegal  = Bool()
-  val pendings = Vec(params.domainNum, UInt(params.intFilesNum.W))
-  val topeis   = Vec(params.domainNum, Vec(params.privNum, UInt(32.W)))
+  val pendings = UInt(params.externalIntFilesNum.W)
+  val notifies = UInt(params.externalIntFilesNum.W)
+  val topeis   = Vec(params.privNum, UInt(32.W))
 }
 case class IMSICParams(
     // MC IMSIC中断源数量的对数，默认值8表示IMSIC支持最多512（2^9）个中断源
@@ -144,7 +145,7 @@ case class IMSICParams(
   lazy val vsBaseFileIndex:  Int = 3
 
   // Address-visible files keep the AIA guestID layout: M, S, VS1, VS2, ...
-  // The confidential S file is selected by the 0x80 address tag, not by a new guestID.
+  // The confidential S file is selected by the 0x800 address tag, not by a new guestID.
   lazy val externalIntFilesNum: Int = 2 + geilen
   lazy val intFilesNum:         Int = 3 + geilen // internal files: m, non-sec s, sec s, vs1, vs2, ...
 
@@ -159,7 +160,7 @@ case class IMSICParams(
   lazy val INTERNAL_FILE_WIDTH   = log2Ceil(intFilesNum)
   lazy val MSI_SEC_TAG_WIDTH     = 1
   lazy val MSI_INFO_WIDTH        = imsicIntSrcWidth + INTP_FILE_WIDTH + MSI_SEC_TAG_WIDTH
-  lazy val dynamicTagOffset: Int = 0x80
+  lazy val dynamicTagOffset: Int = 0x800
   lazy val vsDomainBitmapCSR: Int = 0x78
 }
 
@@ -523,24 +524,20 @@ class IMSIC(
   toCSR.rdata.bits    := vec_rdata.map(_.bits).reduce(_|_) |
     Mux(bitmapCSRReadD, bitmapCSRDataD.pad(params.xlen), 0.U(params.xlen.W))
 
-  private val domainPendingBits = Wire(Vec(params.domainNum, Vec(params.intFilesNum, Bool())))
-  for (domain <- 0 until params.domainNum) {
-    for (file <- 0 until params.intFilesNum) {
-      domainPendingBits(domain)(file) := false.B
-    }
+  private val currentSFilePending =
+    Mux(sec, pendings(params.sSecFileIndex), pendings(params.sNonSecFileIndex))
+  private val notifySFilePending =
+    Mux(sec, pendings(params.sNonSecFileIndex), pendings(params.sSecFileIndex))
+  private val currentVsPendingBits = (0 until params.geilen).map { guest =>
+    val internalFile = params.vsBaseFileIndex + guest
+    (vsIntFileSecBitmap(guest) === sec) && pendings(internalFile)
   }
-  domainPendingBits(0)(params.mFileIndex) := pendings(params.mFileIndex)
-  domainPendingBits(1)(params.mFileIndex) := pendings(params.mFileIndex)
-  domainPendingBits(0)(params.sNonSecFileIndex) := pendings(params.sNonSecFileIndex)
-  domainPendingBits(1)(params.sSecFileIndex) := pendings(params.sSecFileIndex)
-  for (guest <- 0 until params.geilen) {
-    val file = params.vsBaseFileIndex + guest
-    domainPendingBits(0)(file) := !vsIntFileSecBitmap(guest) && pendings(file)
-    domainPendingBits(1)(file) := vsIntFileSecBitmap(guest) && pendings(file)
+  private val notifyVsPendingBits = (0 until params.geilen).map { guest =>
+    val internalFile = params.vsBaseFileIndex + guest
+    (vsIntFileSecBitmap(guest) =/= sec) && pendings(internalFile)
   }
-  for (domain <- 0 until params.domainNum) {
-    toCSR.pendings(domain) := Cat(domainPendingBits(domain).reverse)
-  }
+  toCSR.pendings := Cat(currentVsPendingBits.reverse ++ Seq(currentSFilePending, pendings(params.mFileIndex)))
+  toCSR.notifies := Cat(notifyVsPendingBits.reverse ++ Seq(notifySFilePending, false.B))
 
   locally {
     // Format of *topei:
@@ -557,12 +554,15 @@ class IMSIC(
       selectedVsOH.asBools,
       topeis_forEachIntFiles.drop(params.vsBaseFileIndex)
     ), 0.U)
-    toCSR.topeis(0)(0) := wrap(topeis_forEachIntFiles(params.mFileIndex)) // m
-    toCSR.topeis(1)(0) := wrap(topeis_forEachIntFiles(params.mFileIndex)) // m
-    toCSR.topeis(0)(1) := wrap(topeis_forEachIntFiles(params.sNonSecFileIndex)) // non-sec s
-    toCSR.topeis(1)(1) := wrap(topeis_forEachIntFiles(params.sSecFileIndex)) // sec s
-    toCSR.topeis(0)(2) := Mux(selectedVsSec, 0.U, wrap(selectedVsTopei)) // non-sec vs
-    toCSR.topeis(1)(2) := Mux(selectedVsSec, wrap(selectedVsTopei), 0.U) // sec vs
+    val selectedSTopei = Mux(
+      sec,
+      topeis_forEachIntFiles(params.sSecFileIndex),
+      topeis_forEachIntFiles(params.sNonSecFileIndex)
+    )
+    val selectedVsInCurrentDomain = vgeinValid && (selectedVsSec === sec)
+    toCSR.topeis(0) := wrap(topeis_forEachIntFiles(params.mFileIndex)) // m
+    toCSR.topeis(1) := wrap(selectedSTopei) // current-domain s
+    toCSR.topeis(2) := Mux(selectedVsInCurrentDomain, wrap(selectedVsTopei), 0.U) // current-domain vs
   }  
   val toCSR_illegal_d = RegNext(Seq(
     illegals_forEachIntFiles.reduce(_ | _),

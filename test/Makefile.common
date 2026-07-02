@@ -1,5 +1,7 @@
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
-MODULE = main
+COCOTB_TEST_MODULES ?= main
 EXTRA_ARGS += --trace --trace-fst --trace-structs
+WAVE_FILE ?= dump.fst
+SIM_ARGS += --trace-file $(WAVE_FILE)
 include $(shell cocotb-config --makefiles)/Makefile.sim
