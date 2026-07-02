@@ -34,6 +34,7 @@ test/imsic/waves/
 *.fst
 *.gtkw
 *.vcd
+test/imsic/waves/
 
 # for docs
 *_py.dot
