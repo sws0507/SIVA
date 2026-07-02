@@ -258,3 +258,8 @@ async def aplic_msi_test(dut):
   await FallingEdge(dut.clock)
   dut.intSrcs_43.value = 0
   await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id)
+
+  # DynamicTag: confidential interrupt sources add the 0x80 MSI address tag.
+  await a_put_full32(dut, aplic_sg_base_addr+offset_intsource_sec+1*4, 1<<(int_num-32))
+  await a_put_full32(dut, aplic_sg_base_addr+offset_setipnum, int_num)
+  await expect_int_num(dut, eiid, imsic_sg_base_addr+0x1000*guest_id+imsic_dynamic_tag_offset)

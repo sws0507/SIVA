@@ -48,14 +48,14 @@ async def imsic_1_test(dut):
   topeis_0 = wrap_topei(1996%256)
   await FallingEdge(dut.clock) ## delay one cycle caused by RegGen.
   await delay_fifo(dut)
-  print(dut.toCSR1_topeis_0.value)
-  assert int(dut.toCSR1_topeis_0.value) == topeis_0
+  print(dut.toCSR1_topeis_0_0.value)
+  assert int(dut.toCSR1_topeis_0_0.value) == topeis_0
   cocotb.log.info("mseteipnum passed")
 
   # mclaim began
   cocotb.log.info("mclaim began")
   await claim(dut)
-  assert int(dut.toCSR1_topeis_0.value) == wrap_topei(0)
+  assert int(dut.toCSR1_topeis_0_0.value) == wrap_topei(0)
   cocotb.log.info("mclaim passed")
 
   # 2_mseteipnum_1_bits_mclaim began
@@ -63,13 +63,13 @@ async def imsic_1_test(dut):
   await m_int(dut, 12)
   await FallingEdge(dut.clock) ## delay one cycle caused by RegGen.
   await delay_fifo(dut)
-  assert int(dut.toCSR1_topeis_0.value) == wrap_topei(12)
+  assert int(dut.toCSR1_topeis_0_0.value) == wrap_topei(12)
   await m_int(dut, 8)
   await FallingEdge(dut.clock) ## delay one cycle caused by RegGen.
   await delay_fifo(dut)
-  assert int(dut.toCSR1_topeis_0.value) == wrap_topei(8)
+  assert int(dut.toCSR1_topeis_0_0.value) == wrap_topei(8)
   await claim(dut)
-  assert int(dut.toCSR1_topeis_0.value) == wrap_topei(12)
+  assert int(dut.toCSR1_topeis_0_0.value) == wrap_topei(12)
   cocotb.log.info("2_mseteipnum_1_bits_mclaim passed")
 
   # write_csr:op began
@@ -94,28 +94,28 @@ async def imsic_1_test(dut):
 
   # write_csr:meithreshold began
   cocotb.log.info("write_csr:meithreshold began")
-  mtopei = int(dut.toCSR1_topeis_0.value)
+  mtopei = int(dut.toCSR1_topeis_0_0.value)
   await write_csr(dut, csr_addr_eithreshold, mtopei & 0x7ff)
-  assert int(dut.toCSR1_topeis_0.value) != wrap_topei(mtopei)
+  assert int(dut.toCSR1_topeis_0_0.value) != wrap_topei(mtopei)
   await write_csr(dut, csr_addr_eithreshold, mtopei + 1)
-  assert int(dut.toCSR1_topeis_0.value) == mtopei
+  assert int(dut.toCSR1_topeis_0_0.value) == mtopei
   await write_csr(dut, csr_addr_eithreshold, 0)
   cocotb.log.info("write_csr:meithreshold end")
 
   # write_csr:eip began
   cocotb.log.info("write_csr:eip began")
   await write_csr(dut, csr_addr_eip0, 0xc)
-  assert int(dut.toCSR1_topeis_0.value) == wrap_topei(2)
+  assert int(dut.toCSR1_topeis_0_0.value) == wrap_topei(2)
   cocotb.log.info("write_csr:eip end")
 
   # write_csr:eie began
   cocotb.log.info("write_csr:eie began")
-  mtopei = int(dut.toCSR1_topeis_0.value)
+  mtopei = int(dut.toCSR1_topeis_0_0.value)
   mask = 1 << (mtopei & 0x7ff)
   await write_csr_op(dut, csr_addr_eie0, mask, op_csrrc)
-  assert int(dut.toCSR1_topeis_0.value) != mtopei
+  assert int(dut.toCSR1_topeis_0_0.value) != mtopei
   await write_csr_op(dut, csr_addr_eie0, mask, op_csrrs)
-  assert int(dut.toCSR1_topeis_0.value) == mtopei
+  assert int(dut.toCSR1_topeis_0_0.value) == mtopei
   cocotb.log.info("write_csr:eie passed")
 
   # read_csr:eie began
@@ -130,25 +130,71 @@ async def imsic_1_test(dut):
   # Simple supervisor level test
   cocotb.log.info("simple_supervisor_level began")
   await select_s_intfile(dut)
-  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(0)
+  assert int(dut.toCSR1_topeis_0_1.value) == wrap_topei(0)
   await s_int(dut, 1234%256)
   await FallingEdge(dut.clock) ## delay one cycle caused by RegGen.
   await delay_fifo(dut)
-  assert int(dut.toCSR1_topeis_1.value) == wrap_topei(1234%256)
+  assert int(dut.toCSR1_topeis_0_1.value) == wrap_topei(1234%256)
   await select_m_intfile(dut)
   cocotb.log.info("simple_supervisor_level end")
 
   # Virtualized supervisor level test (vgein=2)
   cocotb.log.info("simple_virtualized_supervisor_level:vgein2 began")
   await select_vs_intfile(dut, 2)
-  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(0)
+  assert int(dut.toCSR1_topeis_0_2.value) == wrap_topei(0)
   await v_int_vgein(dut, 137)
   await FallingEdge(dut.clock)
   await delay_fifo(dut)
-  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(137)
+  assert int(dut.toCSR1_topeis_0_2.value) == wrap_topei(137)
   await select_m_intfile(dut)
-  assert int(dut.toCSR1_topeis_2.value) == wrap_topei(137)
+  assert int(dut.toCSR1_topeis_0_2.value) == wrap_topei(137)
   cocotb.log.info("simple_virtualized_supervisor_level:vgein2 end")
+
+  # DynamicTag confidential S file test
+  cocotb.log.info("dynamic_tag:sec_s_file began")
+  await set_sec(dut, 1)
+  await select_s_intfile(dut)
+  await write_csr(dut, csr_addr_eidelivery, 1)
+  for e in range(0,32):
+    await write_csr(dut, csr_addr_eie0 + 2*e, -1)
+  assert int(dut.toCSR1_topeis_1_1.value) == wrap_topei(0)
+  await s_int_sec(dut, 77)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_1_1.value) == wrap_topei(77)
+  assert int(dut.toCSR1_topeis_0_1.value) == wrap_topei(1234%256)
+  cocotb.log.info("dynamic_tag:sec_s_file end")
+
+  # DynamicTag confidential VS file test (vgein=3)
+  cocotb.log.info("dynamic_tag:sec_vs_file began")
+  await select_m_intfile(dut)
+  await write_csr(dut, csr_addr_vs_domain_bitmap, 1 << (3 - 1))
+  await set_sec(dut, 0)
+  await select_vs_intfile(dut, 3)
+  await v_int_vgein(dut, 211, guestID=3)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_1_2.value) == wrap_topei(0)
+  await v_int_vgein_sec(dut, 211, guestID=3)
+  await FallingEdge(dut.clock)
+  await delay_fifo(dut)
+  assert int(dut.toCSR1_topeis_1_2.value) == wrap_topei(211)
+
+  cocotb.log.info("dynamic_tag:sec_vs_csr_guard began")
+  await set_sec(dut, 0)
+  await select_vs_intfile(dut, 3)
+  await write_csr(dut, csr_addr_eidelivery, 0)
+  assert int(dut.toCSR1_illegal.value) == 1
+  assert int(dut.toCSR1_topeis_1_2.value) == wrap_topei(211)
+  await set_sec(dut, 1)
+  await select_vs_intfile(dut, 3)
+  await write_csr(dut, csr_addr_eidelivery, 0)
+  await FallingEdge(dut.clock)
+  assert int(dut.toCSR1_topeis_1_2.value) == wrap_topei(0)
+  await write_csr(dut, csr_addr_eidelivery, 1)
+  await select_m_intfile(dut)
+  await set_sec(dut, 0)
+  cocotb.log.info("dynamic_tag:sec_vs_file end")
 
   # Illegal iselect test
   cocotb.log.info("illegal:iselect began")

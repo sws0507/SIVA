@@ -81,18 +81,18 @@ async def interrupt(dut, i):
   if EnableImsicAsyncBridge ==1 :
     for _ in range(15):
       await FallingEdge(dut.clock)
-      if int(dut.toCSR0_topeis_0.value) == wrap_topei(i):
+      if int(dut.toCSR0_topeis_0_0.value) == wrap_topei(i):
         break
     else:
-      assert False, f"Timeout waiting for toCSR0_topeis_0 == wrap_topei({i})"
+      assert False, f"Timeout waiting for toCSR0_topeis_0_0 == wrap_topei({i})"
   else :
     for _ in range(10):
       await FallingEdge(dut.clock)
       await FallingEdge(dut.clock)
-      if int(dut.toCSR0_topeis_0.value) == wrap_topei(i):
+      if int(dut.toCSR0_topeis_0_0.value) == wrap_topei(i):
         break
     else:
-      assert False, f"Timeout waiting for toCSR0_topeis_0 == wrap_topei({i})"
+      assert False, f"Timeout waiting for toCSR0_topeis_0_0 == wrap_topei({i})"
 
 ################################################################################
 # IMSIC
@@ -104,6 +104,8 @@ csr_addr_eithreshold = 0x72
 csr_addr_eip0 = 0x80
 csr_addr_eip2 = 0x82
 csr_addr_eie0 = 0xC0
+csr_addr_vs_domain_bitmap = 0x78
+imsic_dynamic_tag_offset = 0x80
 # CSR operation codes
 op_illegal = 0
 op_csrrw = 1
@@ -120,10 +122,25 @@ async def s_int(dut, intnum, imsicID=1):
   await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID, intnum)
   await RisingEdge(dut.clock)
 
+async def s_int_sec(dut, intnum, imsicID=1):
+  """Issue an interrupt to the confidential S-mode interrupt file."""
+  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + imsic_dynamic_tag_offset, intnum)
+  await RisingEdge(dut.clock)
+
 async def v_int_vgein(dut, intnum, imsicID=1, guestID=2):
   """Issue an interrupt to the VS-mode interrupt file with vgein2."""
   await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*guestID, intnum)
   await RisingEdge(dut.clock)
+
+async def v_int_vgein_sec(dut, intnum, imsicID=1, guestID=2):
+  """Issue an interrupt to a confidential VS-mode interrupt file."""
+  await a_put_full32(dut, imsic_sg_base_addr+0x8000*imsicID + 0x1000*guestID + imsic_dynamic_tag_offset, intnum)
+  await RisingEdge(dut.clock)
+
+async def set_sec(dut, sec, imsicID=1):
+  secx = getattr(dut, f"sec{imsicID}")
+  await FallingEdge(dut.clock)
+  secx.value = sec
 
 async def claim(dut, imsicID=1):
   """Claim the highest pending interrupt."""
@@ -198,6 +215,7 @@ async def select_vs_intfile(dut, vgein, imsicID=1):
   fromCSRx_virt.value = 1
 
 async def init_imsic(dut, imsicID=1):
+  await set_sec(dut, 0, imsicID)
   await select_m_intfile(dut, imsicID)
   await write_csr(dut, csr_addr_eidelivery, 1, imsicID)
   for e in range(0,32):
@@ -235,6 +253,7 @@ offset_clries       = 0x1F00
 offset_clrienum     = 0x1FDC
 offset_setipnum_le  = 0x2000
 offset_setipnum_be  = 0x2004
+offset_intsource_sec = 0x2800
 offset_genmsi       = 0x3000
 offset_targets      = 0x3004
 sourcecfg_sm_inactive = 0

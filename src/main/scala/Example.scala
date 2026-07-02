@@ -63,8 +63,10 @@ class TLAIA()(implicit p: Parameters) extends LazyModule {
     (0 until 4).map (i => {
       val toCSR = IO(Output(chiselTypeOf(imsics(i).module.toCSR))).suggestName(f"toCSR${i}")
       val fromCSR = IO(Input(chiselTypeOf(imsics(i).module.fromCSR))).suggestName(f"fromCSR${i}")
+      val sec = IO(Input(Bool())).suggestName(f"sec${i}")
       toCSR   <> imsics(i).module.toCSR
       fromCSR <> imsics(i).module.fromCSR
+      imsics(i).module.sec := sec
     })
     val intSrcs = IO(Input(chiselTypeOf(aplic.module.intSrcs)))
     intSrcs <> aplic.module.intSrcs

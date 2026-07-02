@@ -74,6 +74,7 @@ case class APLICParams(
   require((mBaseAddr & (pow2(membersWidth + mStrideWidth) -1)) == 0, "mBaseAddr should be aligned to a 2^(k+C)")
   lazy val groupStrideWidth: Int = membersWidth + math.max(mStrideWidth, sgStrideWidth) // E: stride between each interrupt file groups
   lazy val groupsWidth     : Int = log2Ceil(groupsNum) // j
+  lazy val dynamicTagOffset : Int = 0x80
   require((sgBaseAddr & (pow2(membersWidth + sgStrideWidth) - 1)) == 0, "sgBaseAddr should be aligned to a 2^(k+D)")
   require(( ((pow2(groupsWidth)-1) * pow2(groupStrideWidth)) & mBaseAddr ) == 0)
   require(( ((pow2(groupsWidth)-1) * pow2(groupStrideWidth)) & sgBaseAddr) == 0)
@@ -199,6 +200,21 @@ class APLIC(
           regs(i).EIID := data(10,0)
       }}
     }
+    private val intSourceSecs = new Bundle {
+      val bits = RegInit(VecInit.fill(params.intSrcNum){false.B})
+      val bits0 = VecInit(false.B +: bits.drop(1)) // source 0 is read-only non-confidential
+      def r32I(i:Int): UInt = Cat((0 until 32).map { j =>
+        val idx = i * 32 + j
+        if (idx < params.intSrcNum) bits0(idx) else false.B
+      }.reverse)
+      def w32I(i:Int, d32:UInt): Unit = (0 until 32).map { j =>
+        val idx = i * 32 + j
+        if (idx > 0 && idx < params.intSrcNum) {
+          bits(idx) := d32(j)
+        }
+      }
+      def bitUI(ui: UInt): Bool = bits0(ui)
+    }
 
     // Writing ips priorities:
     // * 3st: regmapped regs: including setips, setipnum, in_clrips, clripnum
@@ -237,6 +253,8 @@ class APLIC(
         /*genmsi*/      0x3000 -> Seq(RegField(32, genmsi.r, RegWriteFn((v,d)=>{ when(v){genmsi.w(d)}; true.B }))),
         /*targets*/     0x3004 -> (1 until params.intSrcNum).map(i => RegField(32, targets.rI(i),
           RegWriteFn((v, d)=>{ when(v){targets.wI(i, d)}; true.B }))),
+        /*intsource_sec*/0x2800 -> (0 until params.ixNum).map(i => RegField(32, intSourceSecs.r32I(i),
+          RegWriteFn((v, d)=>{ when(v){intSourceSecs.w32I(i, d)}; true.B }))),
       )
     }
 
@@ -290,7 +308,8 @@ class APLIC(
       }
       val genmsiBits = MSIBundle(getMSIAddr(genmsi.HartIndex, 0.U), genmsi.EIID)
       val target = targets.regs(topi)
-      val topiBits = MSIBundle(getMSIAddr(target.HartIndex, target.GuestIndex), target.EIID)
+      val dynamicTag = if (imsicGeilen == 0) 0.U else Mux(intSourceSecs.bitUI(topi), params.dynamicTagOffset.U, 0.U)
+      val topiBits = MSIBundle(getMSIAddr(target.HartIndex, target.GuestIndex) + dynamicTag, target.EIID)
 
       // A pending extempore MSI (genmsi) should be sent by the APLIC with minimal delay.
       io.msi.bits := Mux(genmsi.Busy, genmsiBits, topiBits)
