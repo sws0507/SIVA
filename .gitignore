@@ -33,6 +33,7 @@ sim_build*
 *.fst
 *.gtkw
 *.vcd
+test/imsic/waves/
 
 # for docs
 *_py.dot
