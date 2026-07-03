@@ -2,6 +2,7 @@
 # export MILL_JVM_OPTS="-Xmx16G"
 SIVA_ROOT := $(CURDIR)
 CHISEL_FIRTOOL_PATH ?= /Users/sunweishi/Library/Caches/org.chipsalliance.llvm-firtool/1.62.0/bin/
+MILL ?= $(SIVA_ROOT)/.venv/bin/mill
 XDG_CACHE_HOME ?= $(SIVA_ROOT)/.cache
 COURSIER_CACHE ?= $(SIVA_ROOT)/.cache/coursier
 MILL_LOCAL_HOME ?= $(SIVA_ROOT)/.home
@@ -15,9 +16,9 @@ default: $(addprefix run-,$(testcases))
 gen=gen/filelist.f
 gen_axi=gen_axi/filelist.f
 $(gen): $(wildcard src/main/scala/*)
-	$(SIVA_ROOT)/.venv/bin/mill TLAIA
+	$(MILL) TLAIA
 $(gen_axi): $(wildcard src/main/scala/*)
-	$(SIVA_ROOT)/.venv/bin/mill AXI4AIA
+	$(MILL) AXI4AIA
 
 compile=test/sim_build/Vtop
 compile_axi=test/sim_build_axi/Vtop

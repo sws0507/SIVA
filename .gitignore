@@ -42,3 +42,9 @@ test/imsic/waves/
 book
 *_scala.md
 *.drawio
+
+# for local environments in macmini
+.tools/
+pixi.lock
+pixi.toml
+scripts/

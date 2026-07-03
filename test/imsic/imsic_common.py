@@ -20,7 +20,7 @@ from common import *
 
 
 async def setup_imsic(dut, imsicID=1):
-  cocotb.start_soon(Clock(dut.clock, 1, unit="ns").start())
+  cocotb.start_soon(Clock(dut.clock, 1, units="ns").start())
 
   dut.toaia_0_d_ready.value = 1
   dut.reset.value = 1
