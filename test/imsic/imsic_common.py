@@ -23,6 +23,8 @@ async def setup_imsic(dut, imsicID=1):
   cocotb.start_soon(Clock(dut.clock, 1, units="ns").start())
 
   dut.toaia_0_d_ready.value = 1
+  for i in range(4):
+    getattr(dut, f"sec{i}").value = 0
   dut.reset.value = 1
   for _ in range(10):
     await RisingEdge(dut.clock)

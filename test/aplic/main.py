@@ -259,6 +259,11 @@ async def aplic_msi_test(dut):
   dut.intSrcs_43.value = 0
   await expect_int_num(dut, eiid, imsic_sg_file_addr(0, 0, guest_id))
 
+  # DynamicTag: confidential interrupt sources add the 0x800 MSI address tag.
+  await a_put_full32(dut, aplic_sg_base_addr+offset_intsource_sec+1*4, 1<<(int_num-32))
+  await a_put_full32(dut, aplic_sg_base_addr+offset_setipnum, int_num)
+  await expect_int_num(dut, eiid, imsic_sg_file_addr(0, 0, guest_id)+imsic_dynamic_tag_offset)
+
   # Smmtt SG target uses a flat guest index: bank * (geilen + 1) + local guest.
   int_num = 44
   eiid = 0xAD

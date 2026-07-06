@@ -18,6 +18,8 @@ sec = 0 -> current domain is non-confidential
 sec = 1 -> current domain is confidential
 ```
 
+在当前 `Smmtt-with-IntFilePooling-and-DynamicTag` 分支中，Dynamic Tag 叠加在 AIA/Pooling 视图上使用。启用 Smmtt 时，多 IMSIC bank 的隔离路径优先，Pooling 和 Dynamic Tag 都不重新解释对外视图；当 `sec = 0` 且两个 bitmap 均为 0 时，IMSIC 行为退化为未实现 Dynamic Tag 的 AIA 行为。
+
 ## IMSIC Side
 
 IMSIC 的输入接口需要增加当前域信号 `sec`。该信号用于约束 CSR 配置路径，表示当前访问 IMSIC 的软件上下文属于机密域还是非机密域。
@@ -114,10 +116,10 @@ confidential:     page_base(n) + 0x800
 IMSIC 内部的 MSI payload 扩展为：
 
 ```text
-msiio.data = { addrSec, externalFileIndex, interruptId }
+msiio.data = { addrSec, imsicIndex, externalFileIndex, interruptId }
 ```
 
-`externalFileIndex` 仍然按照原 AIA guestID 布局编码。`addrSec` 来自 MSI 写入地址是否带有 `+0x800` tag。
+`externalFileIndex` 仍然按照原 AIA guestID 布局编码。`imsicIndex` 是 Smmtt/Pooling 分支已有的 physical bank 选择字段。`addrSec` 来自 MSI 写入地址是否带有 `+0x800` tag。
 
 ## IMSIC Receive Check
 

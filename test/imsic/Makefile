@@ -1,5 +1,5 @@
 TOPLEVEL = TLAIA
-COCOTB_TEST_MODULES = imsic_m_mode,imsic_csr,imsic_supervisor,imsic_smmtt,imsic_pooling,imsic_illegal,imsic_readonly
+COCOTB_TEST_MODULES = imsic_m_mode,imsic_csr,imsic_supervisor,imsic_smmtt,imsic_pooling,imsic_dynamic_tag,imsic_illegal,imsic_readonly
 IMSIC_TESTS = \
 	imsic_m_mode_interrupt_test \
 	imsic_csr_access_test \
@@ -10,6 +10,9 @@ IMSIC_TESTS = \
 	imsic_pooling_vs_msi_test \
 	imsic_pooling_extra_s_slot_reinterpreted_as_vs_test \
 	imsic_pooling_invalid_tail_slot_drops_msi_test \
+	imsic_dynamic_tag_s_file_test \
+	imsic_dynamic_tag_vs_file_test \
+	imsic_dynamic_tag_csr_guard_test \
 	imsic_illegal_iselect_test \
 	imsic_illegal_vgein_test \
 	imsic_illegal_wdata_op_test \

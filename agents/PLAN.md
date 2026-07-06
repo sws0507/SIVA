@@ -8,5 +8,5 @@ Unless explicitly stated otherwise, focus only on plans marked as in progress an
 
 1. Completed: Remove the original `HasTEE` code and keep a clean AIA baseline for future modifications.
 2. Completed: Implement a simple Smmtt.
-3. Not started: Implement the dynamic tag.
+3. Completed: Implement the dynamic tag.
 4. Completed: Implement the intFile pooling.

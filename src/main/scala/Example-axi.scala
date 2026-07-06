@@ -77,10 +77,12 @@ class AXI4AIA()(implicit p: Parameters) extends LazyModule {
       val fromCSR = IO(Input(chiselTypeOf(imsics(i).module.fromCSR))).suggestName(f"fromCSR${i}")
       val toSmmtt = IO(Output(chiselTypeOf(imsics(i).module.toSmmtt))).suggestName(f"toSmmtt${i}")
       val fromSmmtt = IO(Input(chiselTypeOf(imsics(i).module.fromSmmtt))).suggestName(f"fromSmmtt${i}")
+      val sec = IO(Input(Bool())).suggestName(f"sec${i}")
       toCSR <> imsics(i).module.toCSR
       fromCSR <> imsics(i).module.fromCSR
       toSmmtt <> imsics(i).module.toSmmtt
       fromSmmtt <> imsics(i).module.fromSmmtt
+      imsics(i).module.sec := sec
     })
     val intSrcs = IO(Input(chiselTypeOf(aplic.module.intSrcs)))
     intSrcs <> aplic.module.intSrcs

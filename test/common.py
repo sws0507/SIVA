@@ -119,6 +119,8 @@ csr_addr_eithreshold = 0x72
 csr_addr_eip0 = 0x80
 csr_addr_eip2 = 0x82
 csr_addr_eie0 = 0xC0
+csr_addr_vs_domain_bitmap = 0x78
+imsic_dynamic_tag_offset = 0x800
 # CSR operation codes
 op_illegal = 0
 op_csrrw = 1
@@ -160,14 +162,29 @@ async def s_int(dut, intnum, imsicID=1, domain=0):
   await a_put_full32(dut, imsic_sg_file_addr(imsicID, domain, 0), intnum)
   await RisingEdge(dut.clock)
 
+async def s_int_sec(dut, intnum, imsicID=1, domain=0):
+  """Issue an interrupt to the confidential S-mode interrupt file."""
+  await a_put_full32(dut, imsic_sg_file_addr(imsicID, domain, 0) + imsic_dynamic_tag_offset, intnum)
+  await RisingEdge(dut.clock)
+
 async def v_int_vgein(dut, intnum, imsicID=1, guestID=2, domain=0):
   """Issue an interrupt to the VS-mode interrupt file with vgein2."""
   await a_put_full32(dut, imsic_sg_file_addr(imsicID, domain, guestID), intnum)
   await RisingEdge(dut.clock)
 
+async def v_int_vgein_sec(dut, intnum, imsicID=1, guestID=2, domain=0):
+  """Issue an interrupt to a confidential VS-mode interrupt file."""
+  await a_put_full32(dut, imsic_sg_file_addr(imsicID, domain, guestID) + imsic_dynamic_tag_offset, intnum)
+  await RisingEdge(dut.clock)
+
 async def pooled_vs_int_vgein(dut, intnum, imsicID=1, vgein=1):
   """Issue an interrupt to a pooled logical VS interrupt file."""
   await a_put_full32(dut, imsic_pooled_vs_file_addr(imsicID, vgein), intnum)
+  await RisingEdge(dut.clock)
+
+async def pooled_vs_int_vgein_sec(dut, intnum, imsicID=1, vgein=1):
+  """Issue an interrupt to a confidential pooled logical VS interrupt file."""
+  await a_put_full32(dut, imsic_pooled_vs_file_addr(imsicID, vgein) + imsic_dynamic_tag_offset, intnum)
   await RisingEdge(dut.clock)
 
 async def claim(dut, imsicID=1):
@@ -252,12 +269,18 @@ async def set_smmtt_enable(dut, enable, imsicID=1):
   await FallingEdge(dut.clock)
   fromSmmttx_smmttEnable.value = enable
 
+async def set_sec(dut, sec, imsicID=1):
+  secx = getattr(dut, f"sec{imsicID}")
+  await FallingEdge(dut.clock)
+  secx.value = sec
+
 async def set_msdeie(dut, msdeie, imsicID=1):
   fromSmmttx_msdeie = getattr(dut, f"fromSmmtt{imsicID}_msdeie")
   await FallingEdge(dut.clock)
   fromSmmttx_msdeie.value = msdeie
 
 async def init_imsic(dut, imsicID=1):
+  await set_sec(dut, 0, imsicID)
   await set_smmtt_enable(dut, 1, imsicID)
   await set_sdicn(dut, 0, imsicID)
   await set_msdeie(dut, 0, imsicID)
@@ -301,6 +324,7 @@ offset_clries       = 0x1F00
 offset_clrienum     = 0x1FDC
 offset_setipnum_le  = 0x2000
 offset_setipnum_be  = 0x2004
+offset_intsource_sec = 0x2800
 offset_genmsi       = 0x3000
 offset_targets      = 0x3004
 sourcecfg_sm_inactive = 0

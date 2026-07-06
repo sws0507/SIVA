@@ -2,9 +2,6 @@ SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 COCOTB_TEST_MODULES ?= main
 MODULE ?= $(COCOTB_TEST_MODULES)
-ifneq ($(strip $(COCOTB_TEST_FILTER)),)
-TESTCASE ?= $(COCOTB_TEST_FILTER)
-endif
 EXTRA_ARGS += --trace --trace-fst --trace-structs
 ifeq ($(SIM),verilator)
 WAVE_FILE ?= dump.fst

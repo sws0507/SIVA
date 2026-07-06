@@ -122,11 +122,13 @@ Smmtt enabled 时，这些逻辑应尽量退化为 wire pass-through，避免影
 `IMSICParams` 增加了 pooled 视图相关参数：
 
 - `poolingView`：top-level `IMSICMulti` 使用 pooled CSR 视图，单个 physical `IMSIC` core 使用 local 视图。
-- `localIntFilesNum = 2 + geilen`：单个 physical bank 内的 M/S/VS 数量。
+- `localExternalIntFilesNum = 2 + geilen`：单个 physical bank 对外可见的 AIA file 数量，仍然是 M/S/VS。
+- `localIntFilesNum = 3 + geilen`：启用 Dynamic Tag 后，单个 physical bank 内部包含 M、non-sec S、sec S 和 VS files。
 - `pooledGeilen = imsicNum * geilen`：pooling mode 下可见的 logical VS 数量。
 - `csrGeilen = poolingView ? pooledGeilen : geilen`。
 - `intFilesNum = 2 + csrGeilen`：top-level `toCSR.pendings` 在 pooling 视图下变宽。
-- `INTP_FILE_WIDTH = log2Ceil(localIntFilesNum)`：MSI payload 中的 file index 仍然保持本地 file index 宽度，不随 pooled pending 宽度扩大。
+- `INTP_FILE_WIDTH = log2Ceil(localExternalIntFilesNum)`：MSI payload 中的 file index 仍然保持本地外部 file index 宽度，不随 pooled pending 宽度扩大。
+- `MSI_INFO_WIDTH` 在原来的 `{imsicIndex, fileIndex, interruptId}` 前增加 `addrSec` bit，用于透传 Dynamic Tag 地址属性。
 
 单个 `IMSIC` core 使用 `coreParams = params.copy(imsicNum = 1, poolingView = false)`，所以 core 内部合法性检查、gateway、CSR 选择仍按本地 `geilen` 工作。
 
