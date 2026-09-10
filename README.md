@@ -1,75 +1,56 @@
-# ChiselAIA
+# DIIA
 
-<!-- vim-markdown-toc GFM -->
+DIIA is built on the RISC-V AIA baseline and extends the interrupt programming model with a security-oriented, domain-aware design for interrupt virtualization and routing.
 
-* [简介（Introduction）](#简介introduction)
-* [使用方法（Usage）](#使用方法usage)
-* [相关工作（Related Works）](#相关工作related-works)
+This branch focuses on a simple, prototype-oriented implementation rather than a full duplicate interrupt subsystem. The goal is to keep the clean AIA structure while adding the domain selection and isolation needed for secure multi-domain interrupt handling.
 
-<!-- vim-markdown-toc -->
 
-ChiselAIA是RISC-V高级中断架构(Advanced Interrupt Architecture, AIA)的开源Chisel实现。
-现有的开源AIA实现主要是用Verilog编写的[相关工作](#相关工作related-works)。
-ChiselAIA旨在将Chisel敏捷开发的方法应用于AIA的实现。
+## Design goals
 
-`ChiselAIA` is an open-sourced Chisel implementation of the RISC-V Advanced Interrupt Architecture (AIA).
-Existing open-sourced AIA implementations are primarily written in Verilog (see [Related Works](#相关工作related-works)).
-`ChiselAIA` aims to leverage Chisel's agile development methodology for AIA implementation.
+- Keep the AIA baseline intact where possible.
+- Add domain-aware interrupt selection without duplicating the whole interrupt subsystem.
+- Support a simple 2-domain model for:
+  - IMSIC interrupt-file banking
+  - MSI address decoding
+  - CSR selection
+  - active-domain state similar to `msdcfg.SDICN`
+- Keep M-level interrupt delivery singular and always active.
 
-## 简介（Introduction）
+## IMSIC changes
 
-该实现包括:
+The IMSIC logic is extended to support domain-aware behavior in a minimal and localized way:
 
-* Incoming Message-Signaled Interrupt Controller (IMSIC): src/main/scala/IMSIC.scala
-* Advanced Platform-Level Interrupt Controller (APLIC): src/main/scala/APLIC.scala
-  * 支持消息信号中断(message-signaled interrupt, MSI)传递模式(domaincfg.DM=1)，
-    该模式下，APLIC将线中断转换为MSI并发送给IMSIC
-  * 暂不支持直接传递模式(domaincfg.DM=0)
-* IMSIC和APLIC的单元测试: test/*/main.py
+- Interrupt-file banking based on selected domain
+- CSR-facing routing and domain selection
+- MSI receive handling with domain-aware dispatch
+- Active-domain state tracking for interrupt delivery
+- Isolation between domains to avoid cross-domain MSI routing leakage
+- Validation of invalid domain selection and pending summary behavior
 
-更多信息，请参阅[文档](https://openxiangshan.github.io/ChiselAIA/)。
+In short, IMSIC remains the core interrupt file and CSR-facing mechanism, but it now carries the domain concept needed for secure interrupt virtualization.
 
-This implementation includes:
+## APLIC changes
 
-* Incoming Message-Signaled Interrupt Controller (IMSIC): `src/main/scala/IMSIC.scala`
-* Advanced Platform-Level Interrupt Controller (APLIC): `src/main/scala/APLIC.scala`
-  * Supports message-signaled interrupt (MSI) delivery mode (domaincfg.DM=1),
-    where the APLIC converts wired interrupts to MSI and sends them to IMSIC
-  * Direct delivery mode is currently not supported (domaincfg.DM=0)
-* The unit tests for IMSIC and APLIC: `test/*/main.py`
+The APLIC path is adjusted to integrate with the same domain-aware model:
 
-For more detailed information, please refer to the [documentation](https://openxiangshan.github.io/ChiselAIA/).
+- Domain-aware MSI generation and routing
+- Address decoding tied to the selected domain
+- Routing and pending/summary behavior kept isolated per domain
+- Localized changes to the existing AIA programming model, without introducing a separate legacy duplicate path
 
-## 使用方法（Usage）
+This keeps the interrupt delivery flow consistent while making it possible to model per-domain interrupt ownership and dispatch.
 
-依赖均由`nix`管理。
-如果你还没有安装`nix`，可以参考`nix`[官方文档进行安装](https://nixos.org/download/)。
+## Repository structure
 
-Dependencies are managed by `nix`.
-If you haven't installed `nix`, you can refer to [nix official installation](https://nixos.org/download/).
+- `src/main/scala/`: Chisel RTL for the project
+  - `APLIC.scala`: APLIC domain handling and MSI generation
+  - `IMSIC.scala`: IMSIC interrupt-file, CSR, and MSI receive logic
+- `test/aplic/`: APLIC-focused tests
+- `test/imsic/`: IMSIC-focused tests
+- `test/integration/`: cross-module validation
+- `docs/`: architecture notes and diagrams
+- `reference/`: external specifications and reference material
 
-```bash
-# 进入nix shell（推荐使用direnv自动进入nix shell）：
-# Enter the nix shell (direnv is recommended for auto entering the nix shell):
-nix-shell
+## Status
 
-# 生成Verilog并运行单元测试：
-# Generate Verilog and run unit tests:
-make -j
-
-# 显示帮助信息：
-# Display help information:
-h
-```
-
-## 相关工作（Related Works）
-
-* [OpenXiangShan/OpenAIA](https://github.com/OpenXiangShan/OpenAIA)
-  * 采用Verilog（Implemented in Verilog）
-  * 支持IMSIC（IMSIC supported）
-  * 不支持APLIC（APLIC not supported）
-* [zero-day-labs/riscv-aia](https://github.com/zero-day-labs/riscv-aia)
-  * 采用Verilog（Implemented in Verilog）
-  * 支持IMSIC（IMSIC supported）
-    * 支持多种IMSIC微架构：原生、岛式和嵌入式（Multiple IMSIC microarchitectures available: vanilla, island and embedded）
-  * 支持APLIC（APLIC supported）
+This repository is a focused prototype aimed at the security-oriented interrupt virtualization problem. It prioritizes correctness, minimal scope, and compatibility with the baseline AIA architecture rather than broad subsystem duplication.
